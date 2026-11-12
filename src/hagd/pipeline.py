@@ -264,11 +264,14 @@ class Pipeline:
                 variants[f"holdout_{key}"] = key
         for name, exclude in variants.items():
             rel = f"gnn/{name}"
-            if self.stages.done(rel):
-                continue
+            if self.stages.done(rel) and self.stages.result(rel).get("trained"):
+                continue  # an untrained GNN (no labels were available yet) is retried
 
             def body(name=name, exclude=exclude, rel=rel):
                 samples = self._label_samples(exclude)
+                if not samples:
+                    log.warning("gnn/%s: no labelled graphs yet; not training (will retry on the next run)", name)
+                    return
                 model, info = train_gnn(samples, self.cfg.gnn, int(self.cfg.seed))
                 if exclude:  # generalisation to the held-out model's graphs
                     held = [s for s in self._label_samples(None) if s.model == exclude]
