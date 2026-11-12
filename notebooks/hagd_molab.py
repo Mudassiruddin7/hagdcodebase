@@ -112,13 +112,25 @@ def _(mo):
                "bitsandbytes": "bitsandbytes", "accelerate": "accelerate", "dotenv": "python-dotenv", "psutil": "psutil"}
     _missing = [pkg for mod, pkg in _wanted.items() if _iu.find_spec(mod) is None]
     if _missing:
-        _code, _out = _pip(_missing)
+        # pin the torch that is already there, so e.g. accelerate cannot upgrade it under torchvision
+        _code, _tv = _sh([sys.executable, "-c", "import importlib.metadata as m; print(m.version('torch'))"])
+        _pin = [f"torch=={_tv.strip()}"] if _code == 0 and _tv.strip() else []
+        _code, _out = _pip(_missing + _pin)
         setup_log.append(f"installed missing: {', '.join(_missing)}" if _code == 0 else f"could not install {_missing}:\n{_out}")
     # verify the model stack really imports, and show the true error if it does not
-    _code, _out = _sh([sys.executable, "-c", "import torch, transformers; from transformers.models.gpt2 import modeling_gpt2; "
-                       "from transformers.models.llama import modeling_llama; from transformers.models.gpt_neox import modeling_gpt_neox; "
-                       "print('torch', torch.__version__, '| transformers', transformers.__version__)"])
-    setup_log.append(("model stack OK: " if _code == 0 else "MODEL STACK BROKEN — restart the kernel after fixing:\n") + _out.strip()[-1500:])
+    _check = [sys.executable, "-c", "import torch, transformers; from transformers.models.gpt2 import modeling_gpt2; "
+              "from transformers.models.llama import modeling_llama; from transformers.models.gpt_neox import modeling_gpt_neox; "
+              "print('torch', torch.__version__, '| transformers', transformers.__version__)"]
+    _code, _out = _sh(_check)
+    if _code != 0 and "torchvision" in _out:
+        # torchvision built for a different torch. HAGD never uses it; transformers only imports it when present.
+        _r, _o = _sh(["uv", "pip", "uninstall", "--python", sys.executable, "torchvision"]) if shutil.which("uv") else (1, "")
+        if _r != 0:
+            _sh([sys.executable, "-m", "pip", "uninstall", "-y", "torchvision"])
+        setup_log.append("removed torchvision (version mismatch with torch; not needed)")
+        _code, _out = _sh(_check)
+    stack_ok = _code == 0
+    setup_log.append(("model stack OK: " if stack_ok else "MODEL STACK BROKEN — restart the kernel after fixing:\n") + _out.strip()[-1500:])
     if str(repo_dir / "src") not in sys.path:
         sys.path.insert(0, str(repo_dir / "src"))
 
@@ -132,7 +144,7 @@ def _(mo):
 
     runs_root = repo_dir / "runs"
     mo.md("**Setup**\n\n" + "\n".join(f"- {line}" for line in setup_log))
-    return Path, os, repo_dir, runs_root, subprocess, sys
+    return Path, os, repo_dir, runs_root, stack_ok, subprocess, sys
 
 
 @app.cell
@@ -221,9 +233,12 @@ def _(Path, runs_root, run_name):
 
 @app.cell
 def _(console_log, extra, mo, models, os, phases, pid_file, profile, repo_dir, repo_id, run_dir, run_name, running_pid,
-      runs_root, start, subprocess, sys, token_box):
+      runs_root, stack_ok, start, subprocess, sys, token_box):
     mo.stop(not start.value)
-    if running_pid() is not None:
+    if not stack_ok:
+        launch_msg = mo.md("**Not started:** the model stack failed its import check (see Setup above). "
+                           "Restart the kernel / session so setup runs again.")
+    elif running_pid() is not None:
         launch_msg = mo.md(f"A pipeline is already running (PID {running_pid()}). Stop it first to change settings.")
     else:
         _env = dict(os.environ)
