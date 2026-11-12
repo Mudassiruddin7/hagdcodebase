@@ -62,7 +62,21 @@ class LM:
     # ------------------------------------------------------------------ loading
     @classmethod
     def load(cls, spec: ModelSpec, device: torch.device, quantization: str | None = None) -> "LM":
+        import importlib
+
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        # transformers hides the real reason behind "Could not import module ..."; surface it once
+        mod = {"gpt2": "gpt2.modeling_gpt2", "pythia": "gpt_neox.modeling_gpt_neox", "llama": "llama.modeling_llama"}.get(spec.family)
+        if mod:
+            try:
+                importlib.import_module(f"transformers.models.{mod}")
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    f"transformers cannot import its {spec.family} model code: {type(e).__name__}: {e}. "
+                    "This usually means torch/torchvision/transformers versions were mixed by a pip upgrade; "
+                    "reinstall a matching set (e.g. `pip install --force-reinstall torch torchvision transformers`) "
+                    "and restart the kernel.") from e
 
         dtype = _DTYPES[spec.dtype] if device.type == "cuda" else torch.float32
         last_err: Exception | None = None

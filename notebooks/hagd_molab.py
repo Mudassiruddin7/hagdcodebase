@@ -91,16 +91,34 @@ def _(mo):
             _code, _out = _sh(["git", "clone", "--depth", "1", REPO_URL, str(repo_dir)])
             setup_log.append(f"git clone ({_code}): {_out.strip()[-200:]}")
 
-    # Install the package and the optional pieces (4-bit loading, zstd shards) into this kernel's environment.
-    _spec = f"{repo_dir}[quant,zstd,notebook]"
-    _code = 1
-    if shutil.which("uv"):
-        _code, _out = _sh(["uv", "pip", "install", "--python", sys.executable, "-e", _spec])
-    if _code != 0:
-        _code, _out = _sh([sys.executable, "-m", "pip", "install", "-e", _spec])
-    if _code != 0:  # optional extras can fail on unusual platforms; the core package is what matters
-        _code, _out = _sh([sys.executable, "-m", "pip", "install", "-e", str(repo_dir)])
-    setup_log.append("package installed" if _code == 0 else f"INSTALL FAILED:\n{_out}")
+    # Install ONLY what is missing. molab ships a matched torch / torchvision / transformers stack;
+    # letting pip "upgrade" any of them breaks transformers' lazy imports
+    # ("Could not import module 'GPT2LMHeadModel'"). So: the package itself with --no-deps,
+    # then each dependency only if it cannot be imported.
+    import importlib.util as _iu
+
+    def _pip(args: list[str]) -> tuple[int, str]:
+        if shutil.which("uv"):
+            c, o = _sh(["uv", "pip", "install", "--python", sys.executable, *args])
+            if c == 0:
+                return c, o
+        return _sh([sys.executable, "-m", "pip", "install", *args])
+
+    _code, _out = _pip(["--no-deps", "-e", str(repo_dir)])
+    setup_log.append("hagd installed (no-deps)" if _code == 0 else f"INSTALL FAILED:\n{_out}")
+    _wanted = {"torch": "torch", "transformers": "transformers", "datasets": "datasets", "huggingface_hub": "huggingface_hub",
+               "safetensors": "safetensors", "scipy": "scipy", "sklearn": "scikit-learn", "pandas": "pandas",
+               "matplotlib": "matplotlib", "yaml": "pyyaml", "requests": "requests", "zstandard": "zstandard",
+               "bitsandbytes": "bitsandbytes", "accelerate": "accelerate", "dotenv": "python-dotenv", "psutil": "psutil"}
+    _missing = [pkg for mod, pkg in _wanted.items() if _iu.find_spec(mod) is None]
+    if _missing:
+        _code, _out = _pip(_missing)
+        setup_log.append(f"installed missing: {', '.join(_missing)}" if _code == 0 else f"could not install {_missing}:\n{_out}")
+    # verify the model stack really imports, and show the true error if it does not
+    _code, _out = _sh([sys.executable, "-c", "import torch, transformers; from transformers.models.gpt2 import modeling_gpt2; "
+                       "from transformers.models.llama import modeling_llama; from transformers.models.gpt_neox import modeling_gpt_neox; "
+                       "print('torch', torch.__version__, '| transformers', transformers.__version__)"])
+    setup_log.append(("model stack OK: " if _code == 0 else "MODEL STACK BROKEN — restart the kernel after fixing:\n") + _out.strip()[-1500:])
     if str(repo_dir / "src") not in sys.path:
         sys.path.insert(0, str(repo_dir / "src"))
 
