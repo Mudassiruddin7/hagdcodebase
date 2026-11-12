@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hagd"
+version = "0.1.0"
+description = "Hierarchical Attribution Graph Decomposition: sparse circuit extraction from language models (replication of arXiv:2601.12879)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.44",
+    "datasets>=2.19",
+    "huggingface_hub>=0.24",
+    "safetensors>=0.4",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Needed only for 4-bit / 8-bit loading of the largest models (Linux + CUDA).
+quant = ["bitsandbytes>=0.43", "accelerate>=0.33"]
+# RedPajama common_crawl shards are zstd-compressed.
+zstd = ["zstandard>=0.22"]
+notebook = ["marimo>=0.9", "python-dotenv>=1.0"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+hagd = "hagd.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hagd = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["slow: downloads a small model from the Hub"]

@@ -1,0 +1,17 @@
+# GPT-2 Small end to end on a single consumer GPU (or a patient CPU).  Reduced token budget.
+run_name: laptop
+models: [gpt2-small]
+label_models: [pythia-70m, pythia-160m]
+data: {n_train: 3000, n_discover: 128, n_val: 64, n_test: 192, batch_size: 16}
+adapt: {steps: 3000, max_minutes: 30}
+transcoder: {num_tokens: 3000000, tokens_per_step: 4096, batch_seqs: 32, max_minutes: 90}
+attribution: {nodes_per_layer: 48}
+gnn: {label_pool: 48}
+baselines:
+  tasks: [mod_arith]
+  acdc: {nodes_per_layer: 8, max_minutes: 30}
+  exhaustive: {pool: 64, max_minutes: 60, models: [gpt2-small]}
+ablations: {model: gpt2-small, tasks: [mod_arith, factual_qa]}
+transfer:
+  pairs: [[pythia-160m, gpt2-small]]
+  tasks: [mod_arith, factual_qa, winogrande]

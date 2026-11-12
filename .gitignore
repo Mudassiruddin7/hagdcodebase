@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# run artifacts are stored on the Hugging Face dataset repo, not in git
+runs/
+*.safetensors
+*.pt
+*.npz
+
+# secrets
+.env
+
+# the paper itself is on arXiv (2601.12879)
+*.pdf
+
+# marimo session state
+__marimo__/

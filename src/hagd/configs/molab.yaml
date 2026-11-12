@@ -1,0 +1,63 @@
+# molab: one RTX PRO 6000 Blackwell (96 GB VRAM), 32 GB RAM, sessions of at most 12 h that can
+# be reclaimed early.  Every stage checkpoints to the Hub, so re-running the same command
+# in a fresh session continues where the last one stopped.
+#
+# Compared with the paper profile: smaller transcoder token budgets, and thinned layers for
+# models whose full set of transcoders does not fit next to the model in 96 GB.
+# Llama-70B is not in the default list (140 GB of weights; needs 4-bit loading) - add it with
+#   --models ... llama-70b   after the smaller models are done.
+run_name: molab
+models: [gpt2-small, gpt2-medium, gpt2-large, pythia-1.4b, pythia-2.8b, pythia-6.9b, llama-7b, llama-13b]
+label_models: [pythia-70m, pythia-160m, gpt2-small]
+data: {n_train: 6000, n_discover: 192, n_val: 96, n_test: 256, batch_size: 32}
+adapt: {steps: 6000, eval_every: 500, max_minutes: 45}
+transcoder:
+  num_tokens: 20000000
+  tokens_per_step: 8192
+  batch_seqs: 64
+  ckpt_minutes: 15
+  max_minutes: 150
+attribution: {nodes_per_layer: 128}
+search: {max_nodes: 800}
+baselines:
+  tasks: [mod_arith]
+  acdc: {nodes_per_layer: 12, n_examples: 32, max_minutes: 60, models: null}
+  exhaustive: {pool: 96, max_enum: 12, max_minutes: 240, models: [gpt2-small]}
+ablations: {model: pythia-1.4b, tasks: [mod_arith, factual_qa]}
+transfer:
+  pairs:
+    - [gpt2-large, pythia-2.8b]
+    - [gpt2-large, llama-7b]
+    - [pythia-2.8b, llama-7b]
+    - [llama-7b, llama-13b]
+    - [llama-7b, llama-70b]
+  tasks: [mod_arith, factual_qa, winogrande]
+
+model_overrides:
+  pythia-70m: {transcoder: {num_tokens: 4000000, max_minutes: 20}, adapt: {steps: 3000}}
+  pythia-160m: {transcoder: {num_tokens: 5000000, max_minutes: 25}, adapt: {steps: 3000}}
+  gpt2-medium: {transcoder: {num_tokens: 15000000, tokens_per_step: 4096}}
+  gpt2-large: {transcoder: {num_tokens: 12000000, layer_stride: 2, tokens_per_step: 4096}}
+  pythia-1.4b: {transcoder: {num_tokens: 10000000, layer_stride: 2, tokens_per_step: 4096}, attribution: {jac_chunk: 16}}
+  pythia-2.8b:
+    transcoder: {num_tokens: 8000000, layer_stride: 4, tokens_per_step: 4096}
+    data: {batch_size: 16}
+    attribution: {jac_chunk: 8}
+  pythia-6.9b:
+    transcoder: {num_tokens: 5000000, layer_stride: 4, tokens_per_step: 2048, batch_seqs: 32}
+    data: {batch_size: 16}
+    attribution: {jac_chunk: 8}
+  llama-7b:
+    transcoder: {num_tokens: 5000000, layer_stride: 4, tokens_per_step: 2048, batch_seqs: 32}
+    data: {batch_size: 16}
+    attribution: {jac_chunk: 8}
+  llama-13b:
+    transcoder: {num_tokens: 4000000, layer_stride: 8, tokens_per_step: 1536, batch_seqs: 32}
+    data: {batch_size: 8}
+    attribution: {jac_chunk: 4}
+  llama-70b:
+    quantization: 4bit
+    transcoder: {num_tokens: 2000000, layer_stride: 16, expansion: 4, tokens_per_step: 1024, batch_seqs: 16}
+    data: {batch_size: 4, n_discover: 96, n_val: 48, n_test: 128}
+    attribution: {nodes_per_layer: 48, jac_chunk: 2}
+    baselines: {methods: [attribution_patching]}

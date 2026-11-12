@@ -1,0 +1,34 @@
+# The paper's stated protocol, without reductions: all nine models of Table I, transcoders on
+# every layer with m/d = 8, 100M RedPajama tokens per model.
+#
+# This does not fit on one 96 GB GPU for the larger models (e.g. Llama-70B needs ~140 GB for
+# the weights in 16-bit plus ~170 GB of transcoder parameters) and takes weeks of GPU time.
+# Use it on a multi-GPU machine, or use the `molab` profile for a single-GPU reduction.
+run_name: paper
+models: [gpt2-small, gpt2-medium, gpt2-large, pythia-1.4b, pythia-2.8b, pythia-6.9b, llama-7b, llama-13b, llama-70b]
+label_models: [pythia-70m, pythia-160m, gpt2-small]
+data: {n_train: 8000, n_discover: 256, n_val: 128, n_test: 512, batch_size: 32}
+adapt: {steps: 10000, eval_every: 500, max_minutes: 120}
+transcoder:
+  expansion: 8
+  layer_stride: 1
+  num_tokens: 100000000
+  tokens_per_step: 8192
+  batch_seqs: 64
+  ckpt_minutes: 30
+  max_minutes: 100000
+attribution: {nodes_per_layer: 96, max_nodes: 8192}
+search: {max_nodes: 800, seeds: 3}
+baselines:
+  tasks: [mod_arith, parity, sorting]
+  acdc: {nodes_per_layer: 16, taus: [0.003, 0.01, 0.03], n_examples: 64, max_minutes: 600, models: null}
+  exhaustive: {pool: 128, max_enum: 14, max_minutes: 600, models: [gpt2-small]}
+ablations: {model: pythia-1.4b, tasks: [mod_arith, factual_qa]}
+transfer:
+  pairs:
+    - [gpt2-large, pythia-2.8b]
+    - [gpt2-large, llama-7b]
+    - [pythia-2.8b, llama-7b]
+    - [llama-7b, llama-70b]
+  tasks: [mod_arith, factual_qa, winogrande]
+fourier: {n_examples: 12769}
