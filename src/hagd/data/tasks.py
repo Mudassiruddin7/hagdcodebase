@@ -61,6 +61,16 @@ class TaskBatch:
         m[:, 0] = False
         return m
 
+    def answer_mask(self) -> torch.Tensor:
+        """Positions whose output is scored: they predict a continuation token."""
+        m = torch.zeros_like(self.target_mask)
+        m[:, :-1] = self.target_mask[:, 1:]
+        return m
+
+    def sites(self, positions: str = "answer") -> torch.Tensor:
+        """Where circuit interventions act: every content token, or only the answer positions."""
+        return self.answer_mask() if positions == "answer" else self.token_mask()
+
 
 def _frac(key: str, salt: str = "") -> float:
     return int(hashlib.md5(f"{salt}|{key}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF

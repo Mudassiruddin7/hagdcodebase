@@ -108,7 +108,7 @@ def table2(df: pd.DataFrame, task: str = "mod_arith") -> pd.DataFrame:
                 "Model": _name(model), "Method": METHOD_LABEL[method],
                 "Nodes": _i(r.nodes), "Edges": _i(r.edges),
                 "Pres.": _f(r.preservation), "95% CI": f"[{_f(r.ci_lo)}, {_f(r.ci_hi)}]",
-                "Empty-circuit pres.": _f(r.preservation_empty), "Pres. (residual kept)": _f(r.preservation_lenient),
+                "Empty-circuit pres.": _f(r.preservation_empty), "Loss gap recovered": _f(r.faithfulness), "Pres. (strict)": _f(r.preservation_strict),
                 "Full acc.": _f(r.acc_full),
                 "Time (s)": _i(r.seconds) if ok else f"{r.status} ({_i(r.seconds)} s)",
                 "Paper nodes": _i(ref[0]) if ref else "—", "Paper edges": _i(ref[1]) if ref else "—",
@@ -130,7 +130,7 @@ def table3(df: pd.DataFrame) -> pd.DataFrame:
             out.append({
                 "Model": _name(model), "Task": TASK_LABEL[task], "Nodes": _i(r.nodes), "Edges": _i(r.edges),
                 "Pres.": _f(r.preservation), "95% CI": f"[{_f(r.ci_lo)}, {_f(r.ci_hi)}]",
-                "Empty-circuit pres.": _f(r.preservation_empty), "Pres. (residual kept)": _f(r.preservation_lenient),
+                "Empty-circuit pres.": _f(r.preservation_empty), "Loss gap recovered": _f(r.faithfulness), "Pres. (strict)": _f(r.preservation_strict),
                 "Mod.": _f(r.modularity), "Full acc.": _f(r.acc_full), "Chance": _f(r.chance),
                 "Paper nodes": _i(ref[0]) if ref else "—", "Paper edges": _i(ref[1]) if ref else "—",
                 "Paper pres.": _f(ref[2]) if ref else "—", "Paper mod.": _f(ref[3]) if ref else "—",
@@ -235,8 +235,7 @@ def table_methods(df: pd.DataFrame) -> pd.DataFrame:
     for _, r in d.sort_values(["task", "model", "name"]).iterrows():
         out.append({"Model": _name(r.model), "Task": TASK_LABEL.get(r.task, r.task), "Method": METHOD_LABEL[r["name"]],
                     "Nodes": _i(r.nodes), "Edges": _i(r.edges), "Pres.": _f(r.preservation),
-                    "Empty-circuit pres.": _f(r.preservation_empty), "Pres. (residual kept)": _f(r.preservation_lenient),
-                    "Empty-circuit pres. (residual kept)": _f(r.preservation_empty_lenient),
+                    "Empty-circuit pres.": _f(r.preservation_empty), "Loss gap recovered": _f(r.faithfulness), "Pres. (strict)": _f(r.preservation_strict),
                     "Faithfulness": _f(r.faithfulness), "Interv. effect": _f(r.intervention_effect), "KL": _f(r.kl, 3),
                     "Purity": _f(r.concept_purity), "Mod.": _f(r.modularity), "DL (bits)": _i(r.description_length_bits),
                     "Full acc.": _f(r.acc_full), "Time (s)": _i(r.seconds), "Status": r.status})
@@ -403,14 +402,17 @@ def build_report(run_dir: Path, cfg) -> Path:
           "Language Models through Scalable Attribution Graph Decomposition* (arXiv:2601.12879). "
           "Code: https://github.com/Mudassiruddin7/hagdcodebase\n",
           "Columns named **Paper …** are the values printed in the paper; every other number was measured by this run. "
-          "How to read the preservation columns:\n",
+          "How to read the faithfulness columns:\n",
           "- **Pres.** — Eq. 10, `Acc(M_C) / Acc(M_full)`, on a held-out test split. Inside `M_C` every feature outside "
-          "the circuit is mean-ablated, and so is the part of each hidden state the transcoders fail to reconstruct, so "
-          "the circuit has to carry the computation itself.",
+          "the circuit is mean-ablated at the answer positions; the part of each hidden state the transcoders do not "
+          "reconstruct is kept (the always-on \"error nodes\" of sparse feature circuits).",
           "- **Empty-circuit pres.** — the same ratio for a circuit with no features. Eq. 10 is an accuracy ratio, so a "
           "model that is near chance on a task scores high here for free; compare `Pres.` against this, not against 0.",
-          "- **Pres. (residual kept)** — the lenient variant in which the unreconstructed part of the hidden state is "
-          "left untouched. Information can then bypass the circuit, so this is an upper bound.\n",
+          "- **Loss gap recovered** — `(L(empty) − L(C)) / (L(empty) − L(full))`. The search requires both this and "
+          "`Pres.` to reach θ, so an empty circuit cannot pass on a near-chance task.",
+          "- **Pres. (strict)** — `Pres.` with the unreconstructed part also mean-ablated. With 15–30% unexplained "
+          "variance per layer this is near 0 even for the full dictionary; it measures the transcoders' dark matter, "
+          "not the circuit.\n",
           _scope(cfg, tables["transcoder_quality"]),
           "## Table II — circuit discovery on modular arithmetic\n", _md(tables["table2_modular_arithmetic"])]
     for key, title in (("table2b_parity", "Parity (not tabulated in the paper)"), ("table2c_sorting", "Sorting (not tabulated in the paper)")):
@@ -476,6 +478,7 @@ def _scope(cfg, tq: pd.DataFrame) -> str:
              f"validation on {cfg.data.n_val}, reporting on {cfg.data.n_test} held-out examples.",
              f"- Algorithmic tasks are taught with a LoRA adapter (mode: `{cfg.adapt.mode}`), because the pretrained "
              "checkpoints cannot perform them and Eq. 10 is otherwise undefined.",
-             f"- Sufficiency threshold θ = {cfg.search.theta}; ablation = {cfg.validation.ablation}; transcoder residual = "
-             f"{cfg.validation.error_mode}.\n"]
+             f"- Sufficiency threshold θ = {cfg.search.theta} on the `{cfg.search.get('criterion', 'combined')}` criterion; "
+             f"interventions at `{cfg.validation.get('positions', 'answer')}` positions; ablation = {cfg.validation.ablation}; "
+             f"transcoder residual = {cfg.validation.error_mode}.\n"]
     return "\n".join(lines)

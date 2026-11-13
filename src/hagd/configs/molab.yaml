@@ -17,12 +17,13 @@ transcoder:
   batch_seqs: 64
   ckpt_minutes: 15
   max_minutes: 150
-attribution: {nodes_per_layer: 128}
-search: {max_nodes: 800}
+attribution: {nodes_per_layer: 512}
+search: {max_nodes: 6000}
+gnn: {label_minutes: 12}
 baselines:
   tasks: [mod_arith]
   acdc: {nodes_per_layer: 12, n_examples: 32, max_minutes: 60, models: null}
-  exhaustive: {pool: 96, max_enum: 12, max_minutes: 240, models: [gpt2-small]}
+  exhaustive: {pool: 96, max_enum: 12, max_minutes: 120, models: [gpt2-small]}
 ablations: {model: pythia-1.4b, tasks: [mod_arith, factual_qa]}
 transfer:
   pairs:
@@ -59,5 +60,5 @@ model_overrides:
     quantization: 4bit
     transcoder: {num_tokens: 2000000, layer_stride: 16, expansion: 4, tokens_per_step: 1024, batch_seqs: 16}
     data: {batch_size: 4, n_discover: 96, n_val: 48, n_test: 128}
-    attribution: {nodes_per_layer: 48, jac_chunk: 2}
+    attribution: {jac_chunk: 2}
     baselines: {methods: [attribution_patching]}

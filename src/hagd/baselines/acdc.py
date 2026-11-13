@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 from ..data.tasks import TaskBatch, score_batch
-from ..extract import finalize_circuit, make_evaluator
+from ..extract import finalize_circuit, make_criterion, make_evaluator
 from ..utils import is_oom, log
 
 
@@ -58,7 +58,7 @@ class _ReplicaModel:
         for b, ref in zip(batches, refs):
             b = b.to(dev)
             n, s = b.input_ids.shape
-            tm = b.token_mask().unsqueeze(-1)
+            tm = fm.sites(b).unsqueeze(-1)
 
             def make(li: int):
                 def fn(h: torch.Tensor) -> torch.Tensor:
@@ -178,7 +178,7 @@ def run_acdc(fm, graph, stats, data, cfg, seed: int = 0) -> dict:
     refs = fm.evaluate(batches, None, keep_dist=True)["dist"]
     model = _ReplicaModel(fm, stats, pools_f, cfg.validation.error_mode)
     evaluate = make_evaluator(fm, stats, graph, data.val, cfg.validation)
-    acc_full = data.full_val["acc"]
+    crit = make_criterion(data, evaluate, cfg)
     weight = {(int(s), int(d)): float(w) for s, d, w in zip(graph.edge_src, graph.edge_dst, graph.edge_w)}
 
     best, runs, status = None, [], "ok"
@@ -201,7 +201,7 @@ def run_acdc(fm, graph, stats, data, cfg, seed: int = 0) -> dict:
                 src.append(s_id)
                 dst.append(d_id)
                 wt.append(weight.get((s_id, d_id), 0.0))
-        phi = (evaluate(nodes)["acc"] / acc_full) if (acc_full > 0 and len(nodes)) else 0.0
+        phi = float(crit(evaluate(nodes))) if len(nodes) else 0.0
         run = {"tau": float(tau), "nodes": int(len(nodes)), "edges": len(src), "val_preservation": phi, **info}
         runs.append(run)
         cand = (phi >= theta, -len(nodes) if phi >= theta else phi)

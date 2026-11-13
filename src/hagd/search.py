@@ -73,9 +73,9 @@ class FlatRanking:
         return self.order[:n]
 
 
-def select_size(ranking, evaluate: Callable[[np.ndarray], dict], acc_full: float, theta: float, min_nodes: int,
-                max_nodes: int, growth: float, n_total: int) -> tuple[np.ndarray, list[dict], bool]:
-    """Smallest ranked prefix with phi >= theta (geometric growth, then bisection).
+def select_size(ranking, evaluate: Callable[[np.ndarray], dict], score: Callable[[dict], float], theta: float,
+                min_nodes: int, max_nodes: int, growth: float, n_total: int) -> tuple[np.ndarray, list[dict], bool]:
+    """Smallest ranked prefix with score >= theta (geometric growth, then bisection).
 
     Returns (selected vertices, evaluation trace, whether theta was reached).
     """
@@ -85,7 +85,7 @@ def select_size(ranking, evaluate: Callable[[np.ndarray], dict], acc_full: float
     def phi_at(k: int) -> float:
         nodes = np.asarray(ranking.take(k), dtype=np.int64)
         res = evaluate(nodes)
-        phi = res["acc"] / acc_full if acc_full > 0 else 0.0
+        phi = float(score(res))
         trace.append({"nodes": int(len(nodes)), "phi": phi, "acc": res["acc"], "loss": res["loss"]})
         return phi
 

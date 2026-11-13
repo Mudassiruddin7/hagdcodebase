@@ -17,8 +17,8 @@ transcoder:
   batch_seqs: 64
   ckpt_minutes: 30
   max_minutes: 100000
-attribution: {nodes_per_layer: 96, max_nodes: 8192}
-search: {max_nodes: 800, seeds: 3}
+attribution: {nodes_per_layer: 512, max_nodes: 16384}
+search: {max_nodes: 12000, seeds: 3}
 baselines:
   tasks: [mod_arith, parity, sorting]
   acdc: {nodes_per_layer: 16, taus: [0.003, 0.01, 0.03], n_examples: 64, max_minutes: 600, models: null}

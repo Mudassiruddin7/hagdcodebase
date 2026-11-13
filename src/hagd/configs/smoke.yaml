@@ -10,11 +10,11 @@ corpus: {source: wikitext, ctx_len: 64}
 adapt: {steps: 400, eval_every: 100, batch_size: 32, rank: 16, alpha: 16, max_minutes: 6}
 transcoder: {expansion: 4, k: 16, num_tokens: 150000, tokens_per_step: 2048, batch_seqs: 32, pred_rank: 64,
              warmup_steps: 20, ckpt_minutes: 60, max_minutes: 10, eval_tokens: 8000}
-attribution: {nodes_per_layer: 24, cross_layer_expand: 4, edge_topk: 8, jac_chunk: 16}
+attribution: {nodes_per_layer: 64, cross_layer_expand: 4, edge_topk: 8, jac_chunk: 16}
 hierarchy: {branching: 3, embed_dim: 8}
-gnn: {meta_iters: 60, hidden: 32, label_pool: 20}
-search: {min_nodes: 4, max_nodes: 120}
-validation: {rounds: 1, bootstrap: 200}
+gnn: {meta_iters: 60, hidden: 32, label_pool: 20, label_minutes: 3}
+search: {min_nodes: 4, max_nodes: 384}
+validation: {rounds: 1, bootstrap: 200, max_tests: 32}
 baselines:
   methods: [attribution_patching, sparse_probing, acdc, exhaustive]
   tasks: [mod_arith]

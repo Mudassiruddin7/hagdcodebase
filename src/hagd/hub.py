@@ -15,6 +15,12 @@ from pathlib import Path
 from .utils import load_json, log, save_json
 
 DONE = "DONE.json"
+# Version of the circuit-extraction protocol.  Stages produced under an older protocol are redone;
+# model-level prerequisites (task adapters, transcoders) do not depend on it and are kept.
+#   1: interventions at every token, residual mean-ablated, accuracy-ratio criterion
+#   2: interventions at answer positions, residual kept, combined criterion, growing exhaustive pool
+PROTOCOL = 2
+UNVERSIONED = ("adapter", "transcoder", "transcoder_nocross")
 CKPT_PATTERNS = ["*.safetensors", "*.pt"]
 
 
@@ -151,12 +157,15 @@ class Stages:
         return d
 
     def done(self, rel: str) -> bool:
-        """True if the stage is complete locally, or can be restored from the Hub."""
-        if (self.run_dir / rel / DONE).exists():
-            return True
-        if f"{rel}/{DONE}" in self.hub.remote_files():
+        """True if the stage is complete (locally, or restorable from the Hub) under the current protocol."""
+        path = self.run_dir / rel / DONE
+        if not path.exists() and f"{rel}/{DONE}" in self.hub.remote_files():
             self.hub.pull(rel)
-        return (self.run_dir / rel / DONE).exists()
+        if not path.exists():
+            return False
+        if rel.rstrip("/").split("/")[-1] in UNVERSIONED:
+            return True
+        return load_json(path).get("protocol") == PROTOCOL
 
     def restore(self, rel: str) -> None:
         """Fetch a partially finished stage (e.g. a training checkpoint) from the Hub."""
@@ -166,7 +175,8 @@ class Stages:
         return load_json(self.run_dir / rel / DONE)
 
     def finish(self, rel: str, meta: dict | None = None, checkpoints: bool = False) -> None:
-        save_json(self.run_dir / rel / DONE, {"finished_at": time.strftime("%Y-%m-%d %H:%M:%S"), **(meta or {})})
+        save_json(self.run_dir / rel / DONE, {"finished_at": time.strftime("%Y-%m-%d %H:%M:%S"), "protocol": PROTOCOL,
+                                              **(meta or {})})
         self.hub.push(rel, checkpoints=checkpoints)
 
     def all_done(self) -> list[str]:

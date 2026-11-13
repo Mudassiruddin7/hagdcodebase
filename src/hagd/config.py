@@ -188,8 +188,8 @@ DEFAULTS: dict[str, Any] = {
         "eval_tokens": 200_000,
     },
     "attribution": {
-        "nodes_per_layer": 64,  # candidate features kept per layer (top |grad x act|)
-        "max_nodes": 4096,
+        "nodes_per_layer": 512,  # candidate features kept per layer (top |grad x act|); Pythia-70M mod-arith needs ~400
+        "max_nodes": 8192,
         "cross_layer_expand": 8,  # extra candidates per layer proposed by the prediction heads
         "edge_topk": 16,  # strongest in/out edges kept per node
         "edge_min_frac": 0.01,  # drop edges below this fraction of the strongest edge
@@ -210,25 +210,32 @@ DEFAULTS: dict[str, Any] = {
         "meta_lr": 0.5,
         "use_edge_weight": False,  # False = Eq. 8 exactly; True adds log-weight bias to attention
         "label_pool": 96,  # exhaustive-search pool on label models
+        "label_minutes": 30,  # time budget of one exhaustive label search
     },
     "search": {
         "theta": 0.9,  # [paper] sufficiency threshold of Eq. 10 / fidelity threshold of Eq. 2
+        "criterion": "combined",  # ratio (Eq. 10 alone) | normalized (loss gap) | combined (min of both); see validation.Criterion
         "min_nodes": 2,
-        "max_nodes": 800,
+        "max_nodes": 6000,
         "growth": 1.5,
         "gamma": 0.3,  # weight of the parent supernode score in a child's priority
         "seeds": 1,
     },
     "validation": {
         "epsilon": 0.002,  # Eq. 9: features with Delta_i < epsilon are pruned
+        "max_tests": 256,  # Eq. 9 is evaluated for the lowest-ranked features of the circuit only (cost: one run each)
+        # where interventions act: "answer" = the positions whose prediction is scored (attention, which the
+        # paper does not model, carries earlier positions in as context); "all" = every content token
+        "positions": "answer",
         "rounds": 2,
         "ablation": "mean",  # mean | zero
         # What happens inside M_C to the part of a hidden state the transcoder cannot reconstruct:
-        #   mean  - replaced by its average: the circuit must carry the computation itself (default)
-        #   clean - kept as computed: lenient, information can bypass the circuit through the residual
+        #   clean - kept as computed, like the always-on "error nodes" of sparse feature circuits [10] (default)
+        #   mean  - replaced by its average (strict).  Measured on molab: with 15-30% unexplained variance per
+        #           layer this destroys the behaviour even when *every* feature is kept, so theta is unreachable.
         #   zero  - dropped
-        # Both the `mean` and `clean` preservation are always reported.
-        "error_mode": "mean",
+        # Both the `clean` and `mean` preservation are always reported, with the empty-circuit baseline.
+        "error_mode": "clean",
         "bootstrap": 1000,
     },
     "baselines": {
@@ -236,7 +243,7 @@ DEFAULTS: dict[str, Any] = {
         "tasks": ["mod_arith"],  # Table II is reported on modular arithmetic
         "acdc": {"nodes_per_layer": 12, "taus": [0.01], "n_examples": 32, "max_minutes": 60,
                  "models": None},  # None = every model
-        "exhaustive": {"pool": 96, "max_enum": 12, "drop_frac": 0.0, "max_minutes": 240,
+        "exhaustive": {"pool": 96, "max_enum": 12, "drop_frac": 0.1, "max_minutes": 240,
                        "models": ["gpt2-small"]},  # [paper] exhaustive only on GPT-2 Small
         "sparse_probing": {"C": 0.1, "max_iter": 300},
     },

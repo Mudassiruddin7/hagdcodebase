@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from ..extract import finalize_circuit, induced_edges, make_evaluator
+from ..extract import finalize_circuit, make_criterion, induced_edges, make_evaluator
 from ..search import FlatRanking, select_size
 
 
@@ -22,7 +22,7 @@ def run_attribution_patching(fm, graph, stats, data, cfg, seed: int = 0) -> dict
     t0 = time.time()
     evaluate = make_evaluator(fm, stats, graph, data.val, cfg.validation)
     ranking = FlatRanking(np.abs(graph.node_ie))
-    nodes, trace, reached = select_size(ranking, evaluate, data.full_val["acc"], float(s.theta), int(s.min_nodes),
+    nodes, trace, reached = select_size(ranking, evaluate, make_criterion(data, evaluate, cfg), float(s.theta), int(s.min_nodes),
                                         int(s.max_nodes), float(s.growth), graph.n)
     seconds = {"attribution_nodes": graph.info.get("node_seconds", 0.0),
                "attribution_edges": graph.info.get("edge_seconds", 0.0), "search": time.time() - t0}

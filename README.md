@@ -104,18 +104,31 @@ implementation needed to be runnable and well defined.
   standardised with fixed statistics so the sigmoid head of Eq. 3 can represent feature values.
 - **Prediction head size.** `W^P` is factorised with rank 512. A dense `m × m` matrix per layer is
   4.3B parameters at Llama-70B's dictionary size.
-- **The circuit-restricted model `M_C`.** Features outside the circuit are replaced by their mean
-  activation on the task, and so is the part of each hidden state the transcoder does not
-  reconstruct (`validation.error_mode: mean`). The circuit therefore has to carry the computation
-  itself. Keeping that residual (`clean`) lets information bypass the circuit: in early tests a
-  one-feature "circuit" then preserved the behaviour. Reports give both, plus the preservation of
-  an empty circuit, because Eq. 10 is an accuracy ratio and is high for free on tasks where the
-  model is near chance.
+- **The circuit-restricted model `M_C`** (protocol 2; each choice was measured on molab with
+  Pythia-70M before it was made):
+  - *Where to intervene.* Features outside the circuit are mean-ablated at the **answer positions**
+    (`validation.positions: answer`), the tokens whose next-token prediction is scored. The paper
+    models MLP features only and leaves attention intact (§VI-C), so earlier tokens stay as context
+    that attention carries in. Ablating at every token removes the identity of the prompt's
+    numbers: modular arithmetic then needed ~2,000 features per layer to reach θ.
+  - *The unreconstructed residual.* It is kept (`validation.error_mode: clean`), like the always-on
+    error nodes of sparse feature circuits [10]. Mean-ablating it too (`mean`) kept only 2–28% of
+    accuracy **with every feature in the circuit**, so θ was unreachable for any circuit. Reports
+    still show it as `Pres. (strict)`.
+  - *The criterion.* Eq. 10 is an accuracy ratio, so an empty circuit scores ~1.0 on tasks where the
+    model is near chance (Pythia-70M on factual QA: 0.91). The search therefore requires both
+    `Pres.` ≥ θ and that the circuit recovers θ of the loss gap between the empty circuit and the
+    full model (`search.criterion: combined`). `ratio` gives Eq. 10 alone.
 - **Task scoring.** WinoGrande uses partial scoring, HellaSwag picks the highest-likelihood ending,
   factual recall is CounterFact's true object against its counterfactual object.
-- **Exhaustive search.** All 2ⁿ subsets cannot be enumerated beyond ~20 vertices. The baseline does
-  exhaustive leave-one-out elimination over a pool of top-attributed features and then enumerates
-  every subset of the survivors.
+- **Exhaustive search.** All 2ⁿ subsets cannot be enumerated beyond ~20 vertices. The baseline
+  grows a pool of top-attributed features until it meets the criterion, eliminates features by
+  measured leave-one-out effect, and enumerates every subset of the last few. If no pool reaches
+  θ the task is reported as unreachable rather than shrunk to a trivial circuit.
+- **Necessity testing (Eq. 9)** costs one model run per feature, so it is applied to the 256
+  lowest-ranked features of a circuit (`validation.max_tests`).
+- **Finished stages are versioned.** Results produced under an older protocol are recomputed on the
+  next run; task adapters and transcoders are reused.
 - **ACDC on features.** ACDC prunes edges of the feature graph with exact per-edge interventions and
   the KL criterion of the original algorithm, over a pool of candidate features per layer.
 - **GNN training tasks.** Labels come from exhaustive search on Pythia-70M/160M and GPT-2 Small over

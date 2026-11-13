@@ -8,7 +8,13 @@ implements the two model variants the validation protocol needs (paper Section I
 * ``knockout``  – the circuit's features are ablated and everything else is left alone.
   Used for the "intervention effect" metric (Section IV-C).
 
-Ablation replaces a feature by its mean activation on the task (or by zero).  The part of
+Interventions act at the intervention *sites* of a prompt: by default the answer positions
+(``positions="answer"``), i.e. the tokens whose next-token prediction is scored.  The paper's
+framework models MLP features only and leaves attention intact (Section VI-C), so earlier
+positions are context that reaches the answer through attention and are not ablated.
+``positions="all"`` intervenes at every content token instead.
+
+Ablation replaces a feature by its mean activation at the sites (or by zero).  The part of
 a hidden state that the transcoder does not reconstruct (the "dark matter" of Section VI-C)
 is handled by ``error``: ``clean`` keeps it as computed, ``mean`` replaces it by its
 average, ``zero`` drops it.  BOS and padding positions are never modified.
@@ -84,17 +90,22 @@ class Intervention:
 
 
 class FeatureModel:
-    def __init__(self, lm: LM, tc: CrossLayerTranscoder, adapter_on: bool = False) -> None:
+    def __init__(self, lm: LM, tc: CrossLayerTranscoder, adapter_on: bool = False, positions: str = "answer") -> None:
+        assert positions in ("answer", "all")
         self.lm, self.tc = lm, tc
+        self.positions = positions
         self.layers = tc.layers  # block index of each transcoder layer
         self.n_layers = len(tc.layers)
         self.adapter_on = adapter_on
+
+    def sites(self, batch: TaskBatch) -> torch.Tensor:
+        return batch.sites(self.positions)
 
     # ------------------------------------------------------------------ forward
     def forward(self, batch: TaskBatch, iv: Intervention | None = None) -> torch.Tensor:
         fns = {}
         if iv is not None:
-            tm = batch.token_mask()
+            tm = self.sites(batch)
             for li, layer in enumerate(self.layers):
                 fns[layer] = (lambda h, li=li: iv.apply(h, li, tm))
         with self.lm.adapter_on(self.adapter_on):

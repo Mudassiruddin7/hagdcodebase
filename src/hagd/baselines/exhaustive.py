@@ -1,14 +1,20 @@
 """Exhaustive search baseline ("brute-force enumeration where computationally feasible").
 
 Enumerating all 2^n vertex subsets is only possible for a handful of vertices, so the
-search is exhaustive in two stages:
+search is exhaustive in three stages:
 
-1. Backward elimination over a pool of the ``pool`` most strongly attributed features.
-   Every round measures, by intervention, the effect of removing *each* remaining feature
-   and discards the one that hurts least, while phi(C) >= theta.  O(pool^2) model runs.
-2. Once at most ``max_enum`` features remain, every subset is enumerated (smallest first)
-   and the smallest one that still satisfies phi >= theta is returned - the exact optimum
-   of Eq. 2 inside that set.
+1. Pool.  Start from the ``pool`` most strongly attributed features and double the pool
+   until it satisfies the fidelity criterion (``hagd.validation.Criterion``).  If even the
+   whole attribution graph does not, the task is reported as ``unreachable`` and the whole
+   graph is returned unchanged - a search that cannot reach theta must not shrink to a
+   trivially small "circuit".
+2. Elimination.  Every round measures, by intervention, the effect of removing *each*
+   remaining feature and drops the least harmful ones (the largest number that keeps the
+   criterion, found by bisection, at most ``drop_frac`` of the circuit per round).
+   One model run per feature per round.
+3. Enumeration.  Once at most ``max_enum`` features remain, every subset is enumerated
+   (smallest first) and the smallest one that still meets the criterion is returned - the
+   exact optimum of Eq. 2 inside that set.
 
 Its output doubles as the ground-truth circuit labels the GNN is trained on
 ("obtained through exhaustive search on small models", Section III-E).
@@ -18,70 +24,96 @@ from __future__ import annotations
 
 import itertools
 import time
+from typing import Callable
 
 import numpy as np
 
-from ..extract import finalize_circuit, induced_edges, make_evaluator
+from ..extract import finalize_circuit, induced_edges, make_criterion, make_evaluator
 from ..utils import log
+
+
+def search(order: np.ndarray, score: Callable[[np.ndarray], float], theta: float, pool: int, max_enum: int,
+           drop_frac: float, budget_seconds: float) -> tuple[np.ndarray, dict]:
+    """The three-stage search over vertices ranked by ``order``; ``score(vertices)`` is the fidelity criterion."""
+    t0 = time.time()
+    n = len(order)
+    # stage 1: smallest pool (doubling) that meets the criterion, then bisect back to the smallest passing prefix
+    size, lo = int(min(max(1, pool), n)), 0
+    while True:
+        pool_score = score(order[:size])
+        if pool_score >= theta or size >= n:
+            break
+        lo, size = size, int(min(n, size * 2))
+    if pool_score >= theta:
+        while size - lo > max(1, int(0.05 * size)):
+            mid = (lo + size) // 2
+            if score(order[:mid]) >= theta:
+                size = mid
+            else:
+                lo = mid
+        pool_score = score(order[:size])
+    circuit = np.asarray(order[:size], dtype=np.int64)
+    status = "ok" if pool_score >= theta else "unreachable"
+
+    # stage 2: elimination by measured leave-one-out effect
+    rounds = 0
+    while status == "ok" and len(circuit) > max_enum:
+        if time.time() - t0 > budget_seconds:
+            status = "timeout"
+            break
+        kept = np.array([score(np.delete(circuit, i)) for i in range(len(circuit))])  # score without each feature
+        cand = np.argsort(-kept, kind="stable")  # least harmful removals first
+        cap = max(1, int(drop_frac * len(circuit))) if drop_frac > 0 else 1
+        cand = cand[:cap]
+        lo_, hi = 0, len(cand)
+        while lo_ < hi:
+            mid = (lo_ + hi + 1) // 2
+            if score(np.delete(circuit, cand[:mid])) >= theta:
+                lo_ = mid
+            else:
+                hi = mid - 1
+        if lo_ == 0:
+            break
+        circuit = np.delete(circuit, cand[:lo_])
+        rounds += 1
+
+    # stage 3: exact enumeration of the survivors (smallest subset first)
+    enumerated = False
+    if status == "ok" and 1 < len(circuit) <= max_enum:
+        enumerated = True
+        for k in range(1, len(circuit)):
+            best = None
+            for subset in itertools.combinations(circuit.tolist(), k):
+                s = score(np.asarray(subset, dtype=np.int64))
+                if s >= theta and (best is None or s > best[0]):
+                    best = (s, subset)
+            if time.time() - t0 > budget_seconds:
+                status = "timeout"
+                break
+            if best is not None:
+                circuit = np.asarray(best[1], dtype=np.int64)
+                break
+    return circuit, {"status": status, "pool": size, "pool_score": float(pool_score), "rounds": rounds,
+                     "enumerated_exactly": enumerated}
 
 
 def run_exhaustive(fm, graph, stats, data, cfg, seed: int = 0, pool: int | None = None) -> dict:
     data.ensure_refs(fm)
     e = cfg.baselines.exhaustive
     theta = float(cfg.search.theta)
-    acc_full = data.full_val["acc"]
-    budget = float(e.max_minutes) * 60
     t0 = time.time()
     evaluate = make_evaluator(fm, stats, graph, data.val, cfg.validation)
-    phi = lambda nodes: (evaluate(nodes)["acc"] / acc_full) if acc_full > 0 else 0.0  # noqa: E731
-
-    size = int(min(pool or e.pool, graph.n))
-    circuit = np.argsort(-np.abs(graph.node_ie), kind="stable")[:size].astype(np.int64)
-    phi_pool = phi(circuit)
-    floor = theta if phi_pool >= theta else phi_pool - 0.01
-    status = "ok"
-
-    # stage 1: exhaustive leave-one-out elimination
-    while len(circuit) > 1:
-        if time.time() - t0 > budget:
-            status = "timeout"
-            break
-        trials = [np.delete(circuit, i) for i in range(len(circuit))]
-        res = [evaluate(t) for t in trials]
-        feasible = [i for i, r in enumerate(res) if (r["acc"] / acc_full if acc_full > 0 else 0.0) >= floor]
-        if not feasible:
-            break
-        feasible.sort(key=lambda i: (-res[i]["acc"], res[i]["loss"]))
-        n_drop = max(1, int(float(e.drop_frac) * len(circuit)))
-        drop = feasible[:n_drop]
-        if len(drop) > 1 and phi(np.delete(circuit, drop)) < floor:
-            drop = drop[:1]
-        circuit = np.delete(circuit, drop)
-
-    # stage 2: exact enumeration of the survivors
-    enumerated = False
-    if status == "ok" and 1 < len(circuit) <= int(e.max_enum):
-        enumerated = True
-        for k in range(1, len(circuit)):
-            best = None
-            for subset in itertools.combinations(circuit.tolist(), k):
-                r = evaluate(np.asarray(subset, dtype=np.int64))
-                if (r["acc"] / acc_full if acc_full > 0 else 0.0) >= floor:
-                    key = (r["acc"], -r["loss"])
-                    if best is None or key > best[0]:
-                        best = (key, subset)
-            if time.time() - t0 > budget:
-                status = "timeout"
-                break
-            if best is not None:
-                circuit = np.asarray(best[1], dtype=np.int64)
-                break
-
-    log.info("exhaustive %s/%s: pool %d -> %d vertices, %d model evaluations (%s)",
-             graph.model, graph.task, size, len(circuit), evaluate.calls, status)
+    crit = make_criterion(data, evaluate, cfg)
+    score = lambda nodes: float(crit(evaluate(nodes)))  # noqa: E731
+    order = np.argsort(-np.abs(graph.node_ie), kind="stable").astype(np.int64)
+    circuit, info = search(order, score, theta, int(pool or e.pool), int(e.max_enum), float(e.drop_frac),
+                           float(e.max_minutes) * 60)
+    log.info("exhaustive %s/%s: pool %d (score %.3f, %s) -> %d vertices after %d rounds, %d model evaluations",
+             graph.model, graph.task, info["pool"], info["pool_score"], info["status"], len(circuit), info["rounds"],
+             evaluate.calls)
     seconds = {"attribution_nodes": graph.info.get("node_seconds", 0.0),
                "attribution_edges": graph.info.get("edge_seconds", 0.0), "search": time.time() - t0}
-    extra = {"status": status, "pool": size, "pool_preservation": phi_pool, "reached_theta": bool(phi_pool >= theta),
-             "enumerated_exactly": enumerated, "ops": {"model_evaluations": int(evaluate.calls)}}
+    extra = {**info, "reached_theta": bool(info["pool_score"] >= theta), "criterion": crit.kind,
+             "val_score": score(circuit), "ops": {"model_evaluations": int(evaluate.calls)}}
     return finalize_circuit(fm, graph, stats, circuit, induced_edges(graph, circuit), data, cfg, "exhaustive",
                             seconds, extra, seed)

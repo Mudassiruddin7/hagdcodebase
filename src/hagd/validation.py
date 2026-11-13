@@ -19,9 +19,43 @@ import numpy as np
 from .utils import ratio_bootstrap_ci
 
 
-def necessity_prune(nodes: np.ndarray, evaluate: Callable[[np.ndarray], dict], acc_full: float, epsilon: float,
-                    theta: float, rounds: int = 2) -> tuple[np.ndarray, dict]:
-    """Remove features whose individual ablation does not raise the task loss by epsilon."""
+class Criterion:
+    """Fidelity score a circuit must reach (Eq. 2: minimise |C| subject to score(C) >= theta).
+
+    * ``ratio``    - Eq. 10 as written: Acc(M_C) / Acc(M_full).
+    * ``normalized`` - share of the loss gap between the empty circuit and the full model that
+      the circuit recovers: (L(empty) - L(C)) / (L(empty) - L(full)).
+    * ``combined`` (default) - the smaller of the two.  The accuracy ratio alone is satisfied by
+      an *empty* circuit whenever the model is close to chance (the ratio of two near-chance
+      accuracies is ~1), so the search also has to recover the loss gap.
+    """
+
+    def __init__(self, kind: str, full: dict, empty: dict) -> None:
+        assert kind in ("ratio", "normalized", "combined")
+        self.kind, self.full, self.empty = kind, full, empty
+
+    def ratio(self, res: dict) -> float:
+        return res["acc"] / self.full["acc"] if self.full["acc"] > 0 else 0.0
+
+    def normalized(self, res: dict) -> float:
+        gap = self.empty["loss"] - self.full["loss"]
+        return (self.empty["loss"] - res["loss"]) / gap if gap > 1e-9 else 0.0
+
+    def __call__(self, res: dict) -> float:
+        if self.kind == "ratio":
+            return self.ratio(res)
+        if self.kind == "normalized":
+            return self.normalized(res)
+        return min(self.ratio(res), self.normalized(res))
+
+
+def necessity_prune(nodes: np.ndarray, evaluate: Callable[[np.ndarray], dict], score: Callable[[dict], float],
+                    epsilon: float, theta: float, rounds: int = 2, max_tests: int | None = None) -> tuple[np.ndarray, dict]:
+    """Remove features whose individual ablation does not raise the task loss by epsilon (Eq. 9),
+    as long as the circuit keeps its fidelity score.
+
+    ``nodes`` must be in ranking order (most likely circuit member first).  Eq. 9 costs one model
+    run per feature, so with ``max_tests`` only the last ``max_tests`` features are tested."""
     nodes = np.asarray(nodes, dtype=np.int64)
     n_evals, removed_total, deltas_last = 0, 0, {}
     for _ in range(max(1, rounds)):
@@ -29,25 +63,25 @@ def necessity_prune(nodes: np.ndarray, evaluate: Callable[[np.ndarray], dict], a
             break
         base = evaluate(nodes)
         n_evals += 1
-        base_phi = base["acc"] / acc_full if acc_full > 0 else 0.0
-        floor = theta if base_phi >= theta else base_phi - 0.01
-        deltas = np.empty(len(nodes))
-        for i in range(len(nodes)):
+        base_score = score(base)
+        floor = theta if base_score >= theta else base_score - 0.02
+        deltas = np.full(len(nodes), np.inf)
+        start = 0 if not max_tests else max(0, len(nodes) - int(max_tests))
+        for i in range(start, len(nodes)):
             deltas[i] = evaluate(np.delete(nodes, i))["loss"] - base["loss"]  # Eq. 9
-        n_evals += len(nodes)
-        deltas_last = {int(v): float(d) for v, d in zip(nodes, deltas)}
+        n_evals += len(nodes) - start
+        deltas_last = {int(v): float(d) for v, d in zip(nodes, deltas) if np.isfinite(d)}
         cand = np.argsort(deltas, kind="stable")
         cand = cand[deltas[cand] < epsilon]
         if len(cand) == 0:
             break
-        # drop as many unnecessary features as possible without losing sufficiency
+        # drop as many unnecessary features as possible without losing fidelity
         lo, hi = 0, len(cand)
         while lo < hi:
             mid = (lo + hi + 1) // 2
             trial = np.delete(nodes, cand[:mid])
             n_evals += 1
-            ok = len(trial) > 0 and (evaluate(trial)["acc"] / acc_full if acc_full > 0 else 0.0) >= floor
-            if ok:
+            if len(trial) > 0 and score(evaluate(trial)) >= floor:
                 lo = mid
             else:
                 hi = mid - 1

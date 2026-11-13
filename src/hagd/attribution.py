@@ -127,7 +127,7 @@ def attribute_nodes(fm: FeatureModel, batches: list[TaskBatch]) -> NodeAttributi
             logits = lm.run(b.input_ids, b.attention_mask, {layer: make(li) for li, layer in enumerate(fm.layers)})
             y = -score_batch(logits, b)["loss"].sum()
             grads = torch.autograd.grad(y, [store[li][0] for li in range(n_l)])
-        tm = b.token_mask()
+        tm = fm.sites(b)
         tmf = tm.unsqueeze(-1).float()
         with torch.no_grad():
             for li in range(n_l):
@@ -183,15 +183,19 @@ def select_candidates(fm: FeatureModel, na: NodeAttribution, nodes_per_layer: in
 # --------------------------------------------------------------------------------------
 
 
-def _jacobian_times_act(out: torch.Tensor, leaf: torch.Tensor, cols: torch.Tensor, chunk: int) -> tuple[torch.Tensor, int]:
-    """For each downstream feature j in ``cols``: d out[j] / d leaf * leaf, shape (len(cols), B, S, Nu).
+def _jacobian_times_act(out: torch.Tensor, leaf: torch.Tensor, cols: torch.Tensor, chunk: int,
+                        site: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """For each downstream feature j in ``cols``: sum over the sites of d out[j] / d leaf * leaf.
 
+    ``leaf`` is (B, S, Nu) and ``site`` a (B, S, 1) 0/1 weight; the result is (len(cols), B, Nu).
+    Positions are summed inside the chunk loop, so memory does not grow with sequence length.
     ``chunk`` backward passes are vectorised at a time; it is halved on out-of-memory and
     drops to 0 (plain sequential backward passes) if an operation has no vmap rule.
     Returns the result and the chunk size that worked, for the caller to reuse.
     """
     from .utils import free_memory, is_oom
 
+    act = leaf.detach() * site
     while chunk > 0:
         rows = []
         try:
@@ -200,7 +204,8 @@ def _jacobian_times_act(out: torch.Tensor, leaf: torch.Tensor, cols: torch.Tenso
                 basis = torch.zeros(len(sel), out.shape[0], device=out.device, dtype=out.dtype)
                 basis[torch.arange(len(sel)), sel] = 1.0
                 (g,) = torch.autograd.grad(out, leaf, grad_outputs=basis, is_grads_batched=True, retain_graph=True)
-                rows.append(g * leaf.detach())
+                rows.append((g * act).sum(-2))
+                del g
             return torch.cat(rows), chunk
         except Exception as e:  # noqa: BLE001
             del rows
@@ -215,7 +220,7 @@ def _jacobian_times_act(out: torch.Tensor, leaf: torch.Tensor, cols: torch.Tenso
     for j in cols.tolist():
         (g,) = torch.autograd.grad(out[j], leaf, retain_graph=True, allow_unused=True)
         g = torch.zeros_like(leaf) if g is None else g
-        rows.append((g * leaf.detach()).unsqueeze(0))
+        rows.append((g * act).sum(-2).unsqueeze(0))
     return torch.cat(rows), 0
 
 
@@ -246,7 +251,7 @@ def attribute_edges(fm: FeatureModel, batches: list[TaskBatch], cands: list[torc
         d_up = tc.W_dec[li][:, up_ids]  # (d, Nu)
         for b in batches:
             b = b.to(dev)
-            tm = b.token_mask()
+            tm = fm.sites(b)
             tmf = tm.unsqueeze(-1).float()
             hold: dict[str, torch.Tensor] = {}
 
@@ -269,9 +274,8 @@ def attribute_edges(fm: FeatureModel, batches: list[TaskBatch], cands: list[torc
                 out = fd.sum((0, 1))
                 active = (out.detach() > 0).nonzero(as_tuple=True)[0]
                 if len(active) > 0:
-                    jac, chunk = _jacobian_times_act(out, leaf, active, chunk)
+                    a, chunk = _jacobian_times_act(out, leaf, active, chunk, tmf)  # (n_active, N_seq, Nu)
                     n_backward += len(active)
-                    a = (jac * tmf).sum(2)  # (n_active, N_seq, Nu): summed over positions
                     a = a.view(len(active), b.n_examples, b.n_choices, -1).sum(2)  # per example
                     ws[:, active] += a.sum(1).t()
                     wa[:, active] += a.abs().sum(1).t()

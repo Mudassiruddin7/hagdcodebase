@@ -23,7 +23,7 @@ from .metrics import concept_purity, description_length, modularity, sparsity_me
 from .replacement import FeatureModel, FeatureStats, nodes_to_dict
 from .search import FlatRanking, Traversal, select_by_score, select_size
 from .utils import peak_memory_gb
-from .validation import necessity_prune, sufficiency_report
+from .validation import Criterion, necessity_prune, sufficiency_report
 
 VARIANTS = ("full", "no_hierarchy", "no_gnn", "no_cross_layer", "no_causal_validation")
 
@@ -60,6 +60,11 @@ def make_evaluator(fm: FeatureModel, stats: FeatureStats, graph: AttributionGrap
 
     evaluate.calls = 0
     return evaluate
+
+
+def make_criterion(data: TaskData, evaluate, cfg) -> Criterion:
+    """The fidelity criterion on the validation split (needs the empty-circuit run for normalisation)."""
+    return Criterion(str(cfg.search.get("criterion", "combined")), data.full_val, evaluate(np.zeros(0, dtype=np.int64)))
 
 
 def verify_edges(fm: FeatureModel, graph: AttributionGraph, nodes: np.ndarray, batches: list[TaskBatch], acfg) -> dict:
@@ -135,7 +140,7 @@ def extract_circuit(fm: FeatureModel, graph: AttributionGraph, stats: FeatureSta
     t_hier = time.time() - t0
 
     evaluate = make_evaluator(fm, stats, graph, data.val, vcfg)
-    acc_full = data.full_val["acc"]
+    crit = make_criterion(data, evaluate, cfg)
     ranking = FlatRanking(scores[0]) if flat else Traversal(hier, scores, float(scfg.gamma))
     t1 = time.time()
     info: dict = {"variant": variant, "gnn_guided": use_gnn, "gnn": getattr(gnn, "name", None) if use_gnn else None,
@@ -147,14 +152,16 @@ def extract_circuit(fm: FeatureModel, graph: AttributionGraph, stats: FeatureSta
         info.update({"reached_theta": None, "trace": [], "pruned": 0})
         t_search, t_valid = time.time() - t1, 0.0
     else:
-        nodes, trace, reached = select_size(ranking, evaluate, acc_full, float(scfg.theta), int(scfg.min_nodes),
+        nodes, trace, reached = select_size(ranking, evaluate, crit, float(scfg.theta), int(scfg.min_nodes),
                                             int(scfg.max_nodes), float(scfg.growth), graph.n)
         t_search = time.time() - t1
         t2 = time.time()
-        nodes, prune = necessity_prune(nodes, evaluate, acc_full, float(vcfg.epsilon), float(scfg.theta), int(vcfg.rounds))
+        nodes, prune = necessity_prune(nodes, evaluate, crit, float(vcfg.epsilon), float(scfg.theta), int(vcfg.rounds),
+                                      vcfg.get("max_tests"))
         edges = verify_edges(fm, graph, nodes, data.val, cfg.attribution)
         t_valid = time.time() - t2
         info.update({"reached_theta": bool(reached), "trace": trace, "pruned": int(prune["removed"]),
+                     "criterion": crit.kind, "val_score": float(crit(evaluate(nodes))),
                      "necessity_deltas": prune["deltas"]})
     n_c = int(len(nodes))
     info["ops"] = {**ranking.ops, "model_evaluations": int(evaluate.calls), "edge_pairs_verified": int(edges["pairs_checked"]),

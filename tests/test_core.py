@@ -165,7 +165,7 @@ def test_edge_attribution_matches_finite_differences(lm, tc, cfg):
     cands = select_candidates(fm, na, 6, 1000)
     w_abs, w_signed, _, _ = attribute_edges(fm, batches[:1], cands, 4, batched=False)
     b = batches[0]
-    tm = b.token_mask().unsqueeze(-1).float()
+    tm = fm.sites(b).unsqueeze(-1).float()  # attribution is taken at the intervention sites
     li = 0
     up, down = cands[li], cands[li + 1]
     i = int(torch.argmax(w_abs[li].sum(1)))
@@ -175,7 +175,7 @@ def test_edge_attribution_matches_finite_differences(lm, tc, cfg):
         def fn(h):
             f = tc.encode(h.float(), li)
             delta = torch.zeros_like(f)
-            delta[..., up[i]] = f[..., up[i]] * scale  # move feature i along its own activation
+            delta[..., up[i]] = f[..., up[i]] * scale * tm[..., 0]  # move feature i along its own activation, at the sites
             return h + tc.decode_delta(delta, li)
 
         hs = {}
@@ -300,7 +300,7 @@ def test_select_size_finds_smallest_sufficient_prefix():
     def evaluate(nodes):
         return {"acc": len(needed & set(nodes.tolist())) / len(needed), "loss": 0.0}
 
-    nodes, trace, reached = select_size(ranking, evaluate, 1.0, 0.99, 2, 15, 1.5, 15)
+    nodes, trace, reached = select_size(ranking, evaluate, lambda r: r["acc"], 0.99, 2, 15, 1.5, 15)
     assert reached and len(nodes) == 6 and needed <= set(nodes.tolist())
 
 
@@ -311,7 +311,7 @@ def test_necessity_prune_drops_only_unnecessary_features():
         hit = len(needed & set(nodes.tolist()))
         return {"acc": hit / 3, "loss": float(3 - hit)}
 
-    kept, info = necessity_prune(np.arange(8), evaluate, acc_full=1.0, epsilon=0.5, theta=0.9, rounds=2)
+    kept, info = necessity_prune(np.arange(8), evaluate, lambda r: r["acc"], epsilon=0.5, theta=0.9, rounds=2)
     assert set(kept.tolist()) == needed and info["removed"] == 5
 
 
@@ -380,6 +380,70 @@ def test_transfer_coefficient_bounds():
     assert transfer_coefficient(circ, acts, 3, other, acts, 3)["tau"] == pytest.approx(0.0)
     unrelated = transfer_coefficient(circ, acts, 3, circ, rng.random((40, 6)), 3, min_corr=0.9)
     assert unrelated["tau"] == pytest.approx(0.0) and unrelated["aligned"] == 0
+
+
+def test_criterion_rejects_empty_circuit_near_chance():
+    """The accuracy ratio alone is ~1 for an empty circuit when the model is near chance; the combined criterion is not."""
+    from hagd.validation import Criterion
+
+    full, empty = {"acc": 0.52, "loss": 0.69}, {"acc": 0.50, "loss": 0.70}
+    c = Criterion("combined", full, empty)
+    assert Criterion("ratio", full, empty)(empty) > 0.9
+    assert c(empty) == pytest.approx(0.0)
+    assert c(full) == pytest.approx(1.0)
+
+
+def test_necessity_prune_only_tests_the_tail():
+    calls = []
+
+    def evaluate(nodes):
+        calls.append(len(nodes))
+        return {"acc": 1.0, "loss": 0.0}
+
+    necessity_prune(np.arange(50), evaluate, lambda r: r["acc"], epsilon=0.5, theta=0.9, rounds=1, max_tests=5)
+    assert calls.count(49) == 5  # five leave-one-out runs, not fifty
+
+
+def test_exhaustive_search_shrinks_but_stays_above_theta(lm, tc):
+    """Pool growth + bisection + elimination + enumeration on a real (tiny) model."""
+    from hagd.baselines.exhaustive import run_exhaustive
+    from hagd.config import load_config
+    from hagd.extract import TaskData
+
+    cfg = load_config("smoke", {"hub": {"enabled": False}, "search": {"theta": 0.5, "criterion": "ratio"},
+                                "validation": {"bootstrap": 10},
+                                "baselines": {"exhaustive": {"pool": 4, "max_enum": 4, "drop_frac": 0.25, "max_minutes": 2}}})
+    task = get_task("ioi", cfg.data)  # two-way choice: a random model sits near 50%, so phi is well defined
+    mk = lambda split, n: encode_examples(lm, task.make(split, n, 0), task.kind, 8, 48)  # noqa: E731
+    data = TaskData(task, mk("discover", 16), mk("val", 16), mk("test", 16))
+    fm = FeatureModel(lm, tc)
+    graph, na = build_graph(fm, data.discover, cfg.attribution, "tiny", "ioi")
+    res = run_exhaustive(fm, graph, na.stats, data, cfg)
+    assert res["status"] in ("ok", "timeout", "unreachable")
+    if res["status"] != "unreachable":
+        assert res["val_score"] >= 0.5
+        assert res["metrics"]["nodes"] <= res["pool"]
+    else:
+        assert res["metrics"]["nodes"] == graph.n  # never shrunk to a trivial circuit
+
+
+def test_exhaustive_core_recovers_planted_circuit():
+    """Elimination + enumeration find exactly the needed features, starting from a pool that is too small."""
+    from hagd.baselines.exhaustive import search
+
+    needed = {5, 17, 30}
+    order = np.array([5, 1, 2, 17, 3, 4, 6, 7, 8, 30, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19])
+
+    def score(nodes):
+        return len(needed & set(np.asarray(nodes).tolist())) / len(needed)
+
+    circuit, info = search(order, score, theta=0.99, pool=4, max_enum=5, drop_frac=0.25, budget_seconds=60)
+    assert info["status"] == "ok" and info["pool"] >= 10  # pool had to grow past position 9 (feature 30)
+    assert info["rounds"] > 0 and info["enumerated_exactly"]
+    assert set(circuit.tolist()) == needed
+
+    _, info = search(order, lambda nodes: 0.5, theta=0.99, pool=4, max_enum=5, drop_frac=0.25, budget_seconds=60)
+    assert info["status"] == "unreachable" and info["pool"] == len(order)
 
 
 def test_nodes_to_dict_groups_by_layer():

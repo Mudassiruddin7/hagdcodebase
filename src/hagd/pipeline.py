@@ -28,7 +28,7 @@ from .adapt import attach_lora, finetune_adapter, plain_accuracy
 from .attribution import AttributionGraph, build_graph
 from .baselines import RUNNERS
 from .complexity import complexity_study
-from .config import Cfg, for_model, model_spec
+from .config import Cfg, deep_merge, for_model, model_spec
 from .data.tasks import get_task, task_batches
 from .extract import TaskData, extract_circuit
 from .fourier import fourier_analysis
@@ -95,7 +95,8 @@ class ModelContext:
 
     def fm(self, task_name: str, cross_layer: bool = True) -> FeatureModel:
         on = bool(self.tasks[task_name].uses_adapter and self.lm.adapter is not None)
-        return FeatureModel(self.lm, self.transcoder(cross_layer), adapter_on=on)
+        return FeatureModel(self.lm, self.transcoder(cross_layer), adapter_on=on,
+                            positions=str(self.cfg.validation.get("positions", "answer")))
 
     # ---------------------------------------------------------------- data
     def task_data(self, name: str) -> TaskData:
@@ -227,11 +228,14 @@ class Pipeline:
                 graph, stats = g
 
                 def body(graph=graph, stats=stats, task=task, rel=rel):
-                    res = RUNNERS["exhaustive"](ctx.fm(task), graph, stats, ctx.task_data(task), ctx.cfg,
+                    lcfg = Cfg.wrap(deep_merge(ctx.cfg.to_dict(), {"baselines": {"exhaustive": {
+                        "max_minutes": float(ctx.cfg.gnn.get("label_minutes", 30))}}}))
+                    res = RUNNERS["exhaustive"](ctx.fm(task), graph, stats, ctx.task_data(task), lcfg,
                                                 int(ctx.cfg.seed), pool=int(ctx.cfg.gnn.label_pool))
                     save_json(self.stages.dir(rel) / "circuit.json", res)
                     self.stages.finish(rel, {"nodes": res["metrics"]["nodes"], "acc_full": res["metrics"]["acc_full"],
-                                             "preservation": res["metrics"]["preservation"]})
+                                             "preservation": res["metrics"]["preservation"], "status": res["status"],
+                                             "val_score": res["val_score"]})
 
                 self._guard(rel, body)
             ctx.close()
@@ -250,6 +254,9 @@ class Pipeline:
                 acc, chance = lab["metrics"]["acc_full"], lab.get("chance", 0.0)
                 if acc < chance + 0.1 * (1 - chance):
                     log.info("gnn: skipping labels %s/%s (model accuracy %.3f is at chance)", key, task, acc)
+                    continue
+                if lab.get("status") == "unreachable":
+                    log.info("gnn: skipping labels %s/%s (no circuit reached theta)", key, task)
                     continue
                 graph = AttributionGraph.load(self.run_dir / key / "graphs" / task)
                 hier = build_hierarchy(graph.n, graph.edge_src, graph.edge_dst, graph.edge_w, int(h.branching),

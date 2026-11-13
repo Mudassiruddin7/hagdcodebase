@@ -43,7 +43,7 @@ def fourier_analysis(fm, graph, nodes: np.ndarray, task, data_cfg, n_examples: i
     for b in batches:
         b = b.to(dev)
         feats = fm.features(b)
-        tm = b.token_mask().unsqueeze(-1)
+        tm = fm.sites(b).unsqueeze(-1)
         for li, local in per_layer.items():
             ids = torch.as_tensor(graph.node_feat[nodes[local]], device=dev)
             a = torch.where(tm, feats[li][..., ids], torch.zeros((), device=dev)).amax(1)

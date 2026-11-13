@@ -13,7 +13,7 @@ import time
 import numpy as np
 import torch
 
-from ..extract import finalize_circuit, make_evaluator
+from ..extract import finalize_circuit, make_criterion, make_evaluator
 from ..search import FlatRanking, select_size
 
 
@@ -65,7 +65,7 @@ def run_sparse_probing(fm, graph, stats, data, cfg, seed: int = 0) -> dict:
         importance = np.abs(l1_logistic(x, y, float(p.C), int(p.max_iter), seed)).sum(0)
     evaluate = make_evaluator(fm, stats, graph, data.val, cfg.validation)
     ranking = FlatRanking(importance + 1e-9 * np.abs(graph.node_ie))  # attribution only breaks ties among zero weights
-    nodes, trace, reached = select_size(ranking, evaluate, data.full_val["acc"], float(s.theta), int(s.min_nodes),
+    nodes, trace, reached = select_size(ranking, evaluate, make_criterion(data, evaluate, cfg), float(s.theta), int(s.min_nodes),
                                         int(s.max_nodes), float(s.growth), graph.n)
     seconds = {"activations": graph.info.get("node_seconds", 0.0), "probe_and_search": time.time() - t0}
     empty = {"src": np.zeros(0, dtype=np.int64), "dst": np.zeros(0, dtype=np.int64), "w": np.zeros(0, dtype=np.float32)}

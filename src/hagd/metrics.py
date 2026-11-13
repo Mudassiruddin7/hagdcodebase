@@ -86,7 +86,7 @@ def concept_purity(fm, graph: AttributionGraph, nodes: np.ndarray, batches, thre
     for b in batches:
         b = b.to(dev)
         feats = fm.features(b)
-        tm = b.token_mask()
+        tm = fm.sites(b)
         rows, cols = tm.nonzero(as_tuple=True)
         tok = b.input_ids[rows, cols]
         has_next = cols + 1 < b.input_ids.shape[1]
