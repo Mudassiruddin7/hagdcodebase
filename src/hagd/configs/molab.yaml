@@ -10,7 +10,7 @@ run_name: molab
 models: [gpt2-small, gpt2-medium, gpt2-large, pythia-1.4b, pythia-2.8b, pythia-6.9b, llama-7b, llama-13b]
 label_models: [pythia-70m, pythia-160m, gpt2-small]
 data: {n_train: 6000, n_discover: 192, n_val: 96, n_test: 256, batch_size: 32}
-adapt: {steps: 6000, eval_every: 500, max_minutes: 45}
+adapt: {steps: 12000, eval_every: 500, max_minutes: 60}  # round robin: ~4,000 steps per task
 transcoder:
   num_tokens: 20000000
   tokens_per_step: 8192
@@ -18,7 +18,7 @@ transcoder:
   ckpt_minutes: 15
   max_minutes: 150
 attribution: {nodes_per_layer: 512}
-search: {max_nodes: 6000}
+search: {max_nodes: 8192}
 gnn: {label_minutes: 12}
 baselines:
   tasks: [mod_arith]

@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .adapt import attach_lora, finetune_adapter, plain_accuracy
+from .adapt import ADAPTER_RECIPE, attach_lora, finetune_adapter, plain_accuracy
 from .attribution import AttributionGraph, build_graph
 from .baselines import RUNNERS
 from .complexity import complexity_study
@@ -69,13 +69,21 @@ class ModelContext:
         rel = f"{self.key}/adapter"
         adapter = attach_lora(self.lm, int(a.rank), float(a.alpha))
         if self.stages.done(rel) and (self.stages.run_dir / rel / "adapter.safetensors").exists():
-            meta = adapter.load(self.stages.run_dir / rel)
-            log.info("%s: adapter restored (val acc %s)", self.key, meta.get("val_acc"))
-            return
+            meta = load_json(self.stages.run_dir / rel / "adapter.json")
+            if meta.get("recipe", 1) == ADAPTER_RECIPE:
+                adapter.load(self.stages.run_dir / rel)
+                log.info("%s: adapter restored (val acc %s)", self.key, meta.get("val_acc"))
+                return
+            # Only models that are not finished get here (finished ones are never loaded), so retraining an
+            # old-recipe adapter cannot change results that were already computed with it.
+            log.info("%s: adapter was trained with recipe %s (current %s): retraining", self.key,
+                     meta.get("recipe", 1), ADAPTER_RECIPE)
         log.info("%s: fine-tuning LoRA adapter on %s", self.key, names)
         meta = finetune_adapter(self.lm, [self.tasks[n] for n in names], self.cfg, int(self.cfg.seed))
+        meta["recipe"] = ADAPTER_RECIPE
         adapter.save(self.stages.dir(rel), meta)
-        self.stages.finish(rel, {"val_acc": meta["val_acc"], "steps": meta["steps"]}, checkpoints=True)
+        self.stages.finish(rel, {"val_acc": meta["val_acc"], "steps": meta["steps"], "recipe": ADAPTER_RECIPE},
+                           checkpoints=True)
 
     # ---------------------------------------------------------------- transcoders
     def transcoder(self, cross_layer: bool = True) -> CrossLayerTranscoder:
@@ -337,10 +345,41 @@ class Pipeline:
             "seconds": {"total": 0.0}, "nodes": [], "edges": []})
         self.stages.finish(rel, {"status": "at_chance", "acc_full": info["acc"]})
 
+    def _required_stages(self, key: str) -> list[str] | None:
+        """Every stage phase_circuits produces for ``key`` (None if that cannot be known without the model)."""
+        cfg = for_model(self.cfg, key)
+        abl_model = self.cfg.ablations.model or (self.cfg.models[0] if self.cfg.models else None)
+        rels = []
+        for task in self.cfg.tasks:
+            base = f"{key}/circuits/{task}"
+            if not self.stages.done(f"{base}/hierarchical"):
+                return None  # its at-chance status is only known once the model is loaded
+            if load_json(self.run_dir / base / "hierarchical" / "circuit.json").get("status") == "at_chance":
+                continue
+            rels += [f"{base}/hierarchical_seed{s}" for s in range(1, int(cfg.search.seeds))]
+            if task in cfg.baselines.tasks:
+                for method in cfg.baselines.methods:
+                    allowed = (cfg.baselines.get(method) or {}).get("models")
+                    if allowed is None or key in allowed:
+                        rels.append(f"{base}/{method}")
+            if key == abl_model and task in cfg.ablations.tasks:
+                rels += [f"{base}/ablation_{v}" for v in cfg.ablations.configs if v != "full"]
+        if bool(cfg.fourier.enabled) and "mod_arith" in self.cfg.tasks and \
+                load_json(self.run_dir / key / "circuits" / "mod_arith" / "hierarchical" / "circuit.json").get("nodes"):
+            rels.append(f"{key}/analysis/fourier")
+        return rels + [f"{key}/scalability"]
+
     def _model_complete(self, key: str) -> bool:
         """Every circuit stage of this model finished in an earlier session (so its weights need not be loaded)."""
         rel = f"{key}/complete"
-        return self.stages.done(rel) and set(self.cfg.tasks) <= set(self.stages.result(rel).get("tasks", []))
+        if self.stages.done(rel) and set(self.cfg.tasks) <= set(self.stages.result(rel).get("tasks", [])):
+            return True
+        # models finished before the completion marker existed: check their stages one by one
+        required = self._required_stages(key)
+        if required is not None and all(self.stages.done(r) for r in required):
+            self.stages.finish(rel, {"tasks": list(self.cfg.tasks), "inferred": True})
+            return True
+        return False
 
     def phase_circuits(self, only: list[str] | None = None) -> None:
         cfg = self.cfg

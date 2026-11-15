@@ -21,8 +21,16 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from .config import Cfg
 from .data.tasks import SPLITS, Task, encode_examples, score_batch
 from .utils import load_json, log, save_json
+
+# Version of the adapter training recipe.  A saved adapter from an older recipe is retrained the next
+# time its model is loaded (finished models are never reloaded, so their results are not affected).
+#   1: AdamW lr 1e-3, cosine schedule, 100-step warmup
+#   2: per-model learning rate (Pythia diverged at 1e-3: loss oscillating 1-4 for 6,000 steps), longer
+#      warmup, and training continues until every task reaches the target or the budget is spent
+ADAPTER_RECIPE = 2
 
 
 def _dims(base: nn.Module) -> tuple[int, int] | None:
@@ -132,7 +140,8 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
     a, d = cfg.adapt, cfg.data
     adapter = attach_lora(lm, int(a.rank), float(a.alpha))
     adapter.enabled = True
-    train, val = [], {}
+    train: dict[str, list] = {}
+    val = {}
     full_domain = []
     for t in tasks:
         if t.finite_domain and bool(a.get("full_domain", True)):
@@ -143,25 +152,37 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
             full_domain.append(t.name)
         else:
             examples = t.make("train", int(d.n_train), seed)
-        train += encode_examples(lm, examples, t.kind, int(a.batch_size), int(d.max_len))
+        train[t.name] = encode_examples(lm, examples, t.kind, int(a.batch_size), int(d.max_len))
         val[t.name] = encode_examples(lm, t.make("val", min(int(d.n_val), 200), seed), t.kind,
                                       int(d.batch_size), int(d.max_len))
     params = adapter.parameters()
-    opt = torch.optim.AdamW(params, lr=float(a.lr), weight_decay=float(a.weight_decay))
+    # bfloat16 models (Pythia >= 1.4B, Llama) diverged at the float32 rate: loss oscillating 1-4 for 6,000 steps
+    low_precision = lm.dtype in (torch.bfloat16, torch.float16)
+    lr = float(a.get("lr_bf16", a.lr)) if low_precision else float(a.lr)
+    a = Cfg.wrap({**a.to_dict(), "lr": lr})
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=float(a.weight_decay))
     steps = int(a.steps)
+    warm = max(1, int(a.get("warmup_steps", 300)))
     sched = torch.optim.lr_scheduler.LambdaLR(
-        opt, lambda s: min(1.0, (s + 1) / 100) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps))))
+        opt, lambda s: min(1.0, (s + 1) / warm) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps))))
     rng = random.Random(seed)
     t0 = time.time()
     history = []
-    order: list = []
-    best = {"min_acc": -1.0, "state": None, "step": 0}
+    # Tasks take turns (round robin), each drawing from its own shuffled batches.  Drawing uniformly from one
+    # pool let full-domain modular arithmetic supply ~half of all batches and starve the other tasks.
+    names = list(train)
+    order: dict[str, list] = {n: [] for n in names}
+    # The kept checkpoint is the one with the best *mean* accuracy.  (Recipe 1 used the minimum, which a
+    # task stuck at chance - parity - turns into noise: Pythia-1.4B kept a step-500 checkpoint at 0% on
+    # the other two tasks.)
+    best = {"score": -1.0, "state": None, "step": 0, "accs": {}}
     step = 0
     for step in range(1, steps + 1):
-        if not order:
-            order = list(train)
-            rng.shuffle(order)
-        b = order.pop().to(lm.device)
+        name = names[(step - 1) % len(names)]
+        if not order[name]:
+            order[name] = list(train[name])
+            rng.shuffle(order[name])
+        b = order[name].pop().to(lm.device)
         loss = score_batch(lm.logits(b.input_ids, b.attention_mask), b)["loss"].mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -173,8 +194,9 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
             history.append({"step": step, "loss": float(loss), **accs})
             log.info("adapt step %d/%d loss %.4f | %s", step, steps, float(loss),
                      " ".join(f"{k}={v:.3f}" for k, v in accs.items()))
-            if min(accs.values()) > best["min_acc"]:
-                best = {"min_acc": min(accs.values()), "state": adapter.state_dict(), "step": step}
+            score = sum(accs.values()) / len(accs)
+            if score > best["score"]:
+                best = {"score": score, "state": adapter.state_dict(), "step": step, "accs": dict(accs)}
             if min(accs.values()) >= float(a.target_acc):
                 break
             if (time.time() - t0) / 60 > float(a.max_minutes):
@@ -183,6 +205,10 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
     if best["state"] is not None:
         adapter.load_state_dict(best["state"])
     adapter.enabled = False
+    log.info("adapt: kept step %d (validation accuracy %s)", best["step"],
+             " ".join(f"{k}={v:.3f}" for k, v in best["accs"].items()))
+    # val_acc describes the weights that were kept, not the last step
     return {"steps": step, "best_step": best["step"], "seconds": time.time() - t0, "history": history,
-            "val_acc": history[-1] if history else {}, "rank": int(a.rank), "tasks": [t.name for t in tasks],
-            "full_domain_tasks": full_domain, "train_batches": len(train)}
+            "val_acc": {"step": best["step"], **best["accs"]}, "last_step": history[-1] if history else {},
+            "rank": int(a.rank), "lr": float(a.lr), "tasks": [t.name for t in tasks],
+            "full_domain_tasks": full_domain, "train_batches": {n: len(bs) for n, bs in train.items()}}

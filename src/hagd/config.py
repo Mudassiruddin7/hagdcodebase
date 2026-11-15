@@ -158,6 +158,8 @@ DEFAULTS: dict[str, Any] = {
         "rank": 32,
         "alpha": 32,
         "lr": 1e-3,
+        "lr_bf16": 3e-4,  # models run in bfloat16 (Pythia >= 1.4B, Llama)
+        "warmup_steps": 300,
         "weight_decay": 0.05,
         "steps": 3000,
         "batch_size": 64,
@@ -219,7 +221,7 @@ DEFAULTS: dict[str, Any] = {
         # Eq. 10 is meaningless there (an empty circuit "preserves" a chance-level accuracy).  0 disables.
         "min_above_chance": 0.1,
         "min_nodes": 2,
-        "max_nodes": 6000,
+        "max_nodes": 8192,  # = attribution.max_nodes: the search may use every candidate (sorting needed ~6,000 on GPT-2)
         "growth": 1.5,
         "gamma": 0.3,  # weight of the parent supernode score in a child's priority
         "seeds": 1,

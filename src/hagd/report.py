@@ -85,11 +85,17 @@ def collect_circuits(run_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+AT_CHANCE_MARGIN = 0.1  # same rule as search.min_above_chance
+
+
 def _note(r) -> str:
     """Why a number should be read with care."""
     if r.status == "at_chance":
         return "model at chance: no search"
     notes = []
+    acc, chance = r.get("acc_full"), r.get("chance")
+    if not _missing(acc) and not _missing(chance) and acc < chance + AT_CHANCE_MARGIN * (1 - chance):
+        notes.append(f"model at chance ({acc:.2f} vs {chance:.2f}): preservation is not meaningful")
     if r.status not in ("ok", None) and isinstance(r.status, str):
         notes.append(r.status)
     if r["name"] == "acdc" and not _missing(r.get("pool_score")):
