@@ -107,7 +107,11 @@ class ModelContext:
         return self.data[name]
 
     def close(self) -> None:
-        self.lm.model.to("cpu") if not self.cfg.get("quantization") else None
+        # drop every reference and let the allocator release GPU memory; copying a multi-GB model back to
+        # host RAM first (as before) can exhaust the RAM of a small cloud machine
+        self.data.clear()
+        self.lm.adapter = None
+        self.lm.model = None
         del self.lm, self._tc
         free_memory()
 
@@ -304,11 +308,48 @@ class Pipeline:
         log.warning("no trained GNN available for %s: falling back to attribution-magnitude guidance", model_key)
         return None
 
+    def _at_chance(self, ctx: ModelContext, task: str) -> dict | None:
+        """The model's own accuracy on a task, if it is too close to chance for a circuit to mean anything.
+
+        Eq. 10 divides by the full model's accuracy; near chance, any circuit (even an empty one)
+        "preserves" it, and the search only burns time.  Uses the validation and test splits together.
+        """
+        margin = float(ctx.cfg.search.get("min_above_chance", 0.1))
+        if margin <= 0:
+            return None
+        data = ctx.task_data(task)
+        data.ensure_refs(ctx.fm(task))
+        n_val, n_test = data.full_val["n"], data.full_test["n"]
+        acc = (data.full_val["acc"] * n_val + data.full_test["acc"] * n_test) / max(n_val + n_test, 1)
+        chance = float(data.task.chance)
+        threshold = chance + margin * (1 - chance)
+        if acc >= threshold:
+            return None
+        return {"acc": float(acc), "chance": chance, "threshold": float(threshold), "n": int(n_val + n_test)}
+
+    def _skip_task(self, ctx: ModelContext, task: str, info: dict) -> None:
+        rel = f"{ctx.key}/circuits/{task}/hierarchical"
+        log.info("%s/%s: model accuracy %.3f is at chance (%.3f; needs %.3f) - no circuit search", ctx.key, task,
+                 info["acc"], info["chance"], info["threshold"])
+        save_json(self.stages.dir(rel) / "circuit.json", {
+            "model": ctx.key, "task": task, "method": "hierarchical", "name": "hierarchical", "status": "at_chance",
+            "metrics": {"acc_full": info["acc"]}, "chance": info["chance"], "at_chance": info,
+            "seconds": {"total": 0.0}, "nodes": [], "edges": []})
+        self.stages.finish(rel, {"status": "at_chance", "acc_full": info["acc"]})
+
+    def _model_complete(self, key: str) -> bool:
+        """Every circuit stage of this model finished in an earlier session (so its weights need not be loaded)."""
+        rel = f"{key}/complete"
+        return self.stages.done(rel) and set(self.cfg.tasks) <= set(self.stages.result(rel).get("tasks", []))
+
     def phase_circuits(self, only: list[str] | None = None) -> None:
         cfg = self.cfg
         abl_model = cfg.ablations.model or (cfg.models[0] if cfg.models else None)
         for key in cfg.models:
             if only and key not in only:
+                continue
+            if self._model_complete(key):
+                log.info("%s: all stages finished in an earlier session - skipping", key)
                 continue
             ctx = self._open(key, list(cfg.tasks))
             if ctx is None:
@@ -317,7 +358,15 @@ class Pipeline:
             t_model = time.time()
             gnn = self.gnn_for(key)
             mcfg = ctx.cfg
+            failed_before = len(list(self.run_dir.glob(f"{key}/**/ERROR.json")))
             for task in cfg.tasks:
+                if not self.stages.done(f"{key}/circuits/{task}/hierarchical"):
+                    chance = self._guard(f"{key}/circuits/{task}/hierarchical", lambda task=task: self._at_chance(ctx, task))
+                    if chance:
+                        self._skip_task(ctx, task, chance)
+                        continue
+                elif load_json(self.run_dir / key / "circuits" / task / "hierarchical" / "circuit.json").get("status") == "at_chance":
+                    continue
                 # ---- HAGD
                 for seed in range(int(mcfg.search.seeds)):
                     name = "hierarchical" if seed == 0 else f"hierarchical_seed{seed}"
@@ -343,13 +392,22 @@ class Pipeline:
             if bool(mcfg.fourier.enabled) and "mod_arith" in cfg.tasks:
                 self._fourier(ctx)
             self._scalability(ctx, time.time() - t_model)
+            # mark the model complete only if nothing failed, so a resumed session retries failures
+            failed_now = [p for p in self.run_dir.glob(f"{key}/**/ERROR.json") if not (p.parent / "DONE.json").exists()]
+            if not failed_now:
+                self.stages.finish(f"{key}/complete", {"tasks": list(cfg.tasks)})
+            else:
+                log.warning("%s: %d stage(s) failed (%d before this session); the model will be revisited on resume",
+                            key, len(failed_now), failed_before)
             ctx.close()
 
     def _fourier(self, ctx: ModelContext) -> None:
         rel = f"{ctx.key}/analysis/fourier"
         circ_dir = self.run_dir / ctx.key / "circuits" / "mod_arith" / "hierarchical"
-        if self.stages.done(rel) or not (circ_dir / "circuit.json").exists():
+        if self.stages.done(rel) or not self.stages.done(f"{ctx.key}/circuits/mod_arith/hierarchical"):
             return
+        if not load_json(circ_dir / "circuit.json").get("nodes") or not self.stages.done(f"{ctx.key}/graphs/mod_arith"):
+            return  # no circuit (e.g. model at chance) or its graph is unavailable
 
         def body():
             circ = load_json(circ_dir / "circuit.json")
@@ -368,7 +426,8 @@ class Pipeline:
         for task in self.cfg.tasks:
             c = self.run_dir / ctx.key / "circuits" / task / "hierarchical" / "circuit.json"
             g = self.run_dir / ctx.key / "graphs" / task / "graph.json"
-            if c.exists() and g.exists():
+            # earlier sessions' stages are only on the Hub: done() restores them
+            if self.stages.done(f"{ctx.key}/circuits/{task}/hierarchical") and self.stages.done(f"{ctx.key}/graphs/{task}"):
                 circ, info = load_json(c), load_json(g)["info"]
                 rows.append({"task": task, "seconds": circ["seconds"]["total"], "peak_memory_gb": circ.get("peak_memory_gb", 0.0),
                              "features_per_second": info["features_per_second"], "edges_per_second": info["edges_per_second"]})
@@ -432,6 +491,8 @@ class Pipeline:
     def phase_report(self) -> None:
         from .report import build_report
 
+        self.hub.flush_pending()
+        self.hub.pull_matching((".json",))  # results of models finished in earlier sessions
         build_report(self.run_dir, self.cfg)
         self.hub.push("report")
         self.hub.push("logs")
@@ -472,7 +533,10 @@ class Pipeline:
                 self.phase_complexity()
             elif phase == "report":
                 self.phase_report()
+        self.hub.wait_background()
+        self.hub.flush_pending()
         log.info("pipeline finished in %.1f min; artifacts in %s", (time.time() - t0) / 60, self.run_dir)
+        self.hub.push_logs(every_minutes=0)
 
 
 def _fmt(x) -> str:

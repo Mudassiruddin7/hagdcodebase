@@ -83,6 +83,13 @@ class LM:
         for hf_id in (spec.hf_id, *spec.fallback_ids):
             try:
                 kwargs: dict = {"low_cpu_mem_usage": True}
+                if device.type == "cuda" and not quantization:
+                    # stream the weights straight onto the GPU: the host may have less RAM than the model needs
+                    # (molab: 32 GB of RAM, Llama-13B is 26 GB in bfloat16)
+                    import importlib.util
+
+                    if importlib.util.find_spec("accelerate") is not None:
+                        kwargs["device_map"] = {"": device.index or 0}
                 if quantization:
                     from transformers import BitsAndBytesConfig
 
@@ -95,7 +102,7 @@ class LM:
                     model = AutoModelForCausalLM.from_pretrained(hf_id, dtype=dtype, **kwargs)
                 except TypeError:
                     model = AutoModelForCausalLM.from_pretrained(hf_id, torch_dtype=dtype, **kwargs)
-                if not quantization:
+                if not quantization and "device_map" not in kwargs:
                     model = model.to(device)
                 tok = AutoTokenizer.from_pretrained(hf_id)
                 if hf_id != spec.hf_id:

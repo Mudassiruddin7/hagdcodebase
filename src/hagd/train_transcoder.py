@@ -120,11 +120,25 @@ def train_transcoders(lm: LM, cfg, stages: Stages, rel: str, tasks: list[Task], 
     recent: dict = {}
 
     def checkpoint(final: bool = False) -> None:
+        """Save, and upload in the background so training is not stalled by multi-GB uploads.
+
+        While the previous upload is still running the checkpoint is skipped (the files it is
+        reading must not change underneath it); the next interval tries again.  The final
+        weights are uploaded synchronously by ``Stages.finish`` after the evaluation.
+        """
+        if not final and stages.hub.background_busy():
+            log.info("transcoder %s: previous checkpoint still uploading; skipping this one", lm.key)
+            return
+        if final:
+            stages.hub.wait_background()
         state["seconds"] += time.time() - checkpoint.t_mark  # type: ignore[attr-defined]
         checkpoint.t_mark = time.time()  # type: ignore[attr-defined]
         tc.save(out_dir, {"model": lm.key, "hf_id": getattr(lm, "hf_id", None), "corpus": getattr(documents, "source_used", None)})
         save_json(out_dir / "train_state.json", {**state, "final": final, "recent": recent})
-        stages.hub.push(rel, f"transcoder checkpoint {rel} @ {state['tokens_seen']} tokens", checkpoints=True)
+        if not final:
+            stages.hub.push(rel, f"transcoder checkpoint {rel} @ {state['tokens_seen']} tokens", checkpoints=True,
+                            background=True)
+            stages.hub.push_logs()
 
     checkpoint.t_mark = time.time()  # type: ignore[attr-defined]
 

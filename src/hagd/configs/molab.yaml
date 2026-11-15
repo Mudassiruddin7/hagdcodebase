@@ -22,7 +22,7 @@ search: {max_nodes: 6000}
 gnn: {label_minutes: 12}
 baselines:
   tasks: [mod_arith]
-  acdc: {nodes_per_layer: 12, n_examples: 32, max_minutes: 60, models: null}
+  acdc: {nodes_per_layer: 12, n_examples: 32, max_minutes: 30, models: null}
   exhaustive: {pool: 96, max_enum: 12, max_minutes: 120, models: [gpt2-small]}
 ablations: {model: pythia-1.4b, tasks: [mod_arith, factual_qa]}
 transfer:
@@ -37,8 +37,9 @@ transfer:
 model_overrides:
   pythia-70m: {transcoder: {num_tokens: 4000000, max_minutes: 20}, adapt: {steps: 3000}}
   pythia-160m: {transcoder: {num_tokens: 5000000, max_minutes: 25}, adapt: {steps: 3000}}
-  gpt2-medium: {transcoder: {num_tokens: 15000000, tokens_per_step: 4096}}
-  gpt2-large: {transcoder: {num_tokens: 12000000, layer_stride: 2, tokens_per_step: 4096}}
+  # small models leave the GPU mostly idle at batch 32: larger evaluation batches (same results, fewer launches)
+  gpt2-medium: {transcoder: {num_tokens: 15000000, tokens_per_step: 4096}, data: {batch_size: 96}}
+  gpt2-large: {transcoder: {num_tokens: 12000000, layer_stride: 2, tokens_per_step: 4096}, data: {batch_size: 64}}
   pythia-1.4b: {transcoder: {num_tokens: 10000000, layer_stride: 2, tokens_per_step: 4096}, attribution: {jac_chunk: 16}}
   pythia-2.8b:
     transcoder: {num_tokens: 8000000, layer_stride: 4, tokens_per_step: 4096}

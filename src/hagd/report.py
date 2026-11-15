@@ -14,6 +14,7 @@ import pandas as pd
 
 from . import paper_reference as paper
 from .config import ALGORITHMIC_TASKS, LANGUAGE_TASKS, MODEL_REGISTRY
+from .hub import PROTOCOL
 from .utils import load_json, log, save_json
 
 TASK_LABEL = {"mod_arith": "Mod. Arith.", "parity": "Parity", "sorting": "Sorting", "winogrande": "WinoGrande",
@@ -50,9 +51,17 @@ def _i(x) -> str:
     return f"{int(round(float(x))):,}"
 
 
+def _current(stage_dir: Path) -> bool:
+    """A finished stage of the current protocol (older-protocol leftovers are being recomputed)."""
+    done = stage_dir / "DONE.json"
+    return done.exists() and load_json(done).get("protocol") == PROTOCOL
+
+
 def collect_circuits(run_dir: Path) -> pd.DataFrame:
     rows = []
     for path in sorted(run_dir.glob("*/circuits/*/*/circuit.json")):
+        if not _current(path.parent):
+            continue
         r = load_json(path)
         m = r.get("metrics", {})
         rows.append({
@@ -70,9 +79,25 @@ def collect_circuits(run_dir: Path) -> pd.DataFrame:
             "concept_purity": m.get("concept_purity"), "description_length_bits": m.get("description_length_bits"),
             "compression": m.get("compression_nodes"), "seconds": r.get("seconds", {}).get("total"),
             "reached_theta": r.get("reached_theta"), "gnn_guided": r.get("gnn_guided"),
-            "peak_memory_gb": r.get("peak_memory_gb"),
+            "peak_memory_gb": r.get("peak_memory_gb"), "pool_score": r.get("pool_score"),
+            "pool_per_layer": r.get("pool_per_layer"),
         })
     return pd.DataFrame(rows)
+
+
+def _note(r) -> str:
+    """Why a number should be read with care."""
+    if r.status == "at_chance":
+        return "model at chance: no search"
+    notes = []
+    if r.status not in ("ok", None) and isinstance(r.status, str):
+        notes.append(r.status)
+    if r["name"] == "acdc" and not _missing(r.get("pool_score")):
+        notes.append(f"pool of {int(r.pool_per_layer or 0)}/layer scores {r.pool_score:.2f}")
+    reached = r.get("reached_theta")
+    if reached is not None and not _missing(reached) and not bool(reached):
+        notes.append("θ not reached")
+    return "; ".join(notes)
 
 
 def _md(df: pd.DataFrame) -> str:
@@ -113,6 +138,7 @@ def table2(df: pd.DataFrame, task: str = "mod_arith") -> pd.DataFrame:
                 "Time (s)": _i(r.seconds) if ok else f"{r.status} ({_i(r.seconds)} s)",
                 "Paper nodes": _i(ref[0]) if ref else "—", "Paper edges": _i(ref[1]) if ref else "—",
                 "Paper pres.": _f(ref[2]) if ref else "—", "Paper time (s)": _i(ref[3]) if ref else "—",
+                "Notes": _note(r),
             })
     return pd.DataFrame(out)
 
@@ -134,6 +160,7 @@ def table3(df: pd.DataFrame) -> pd.DataFrame:
                 "Mod.": _f(r.modularity), "Full acc.": _f(r.acc_full), "Chance": _f(r.chance),
                 "Paper nodes": _i(ref[0]) if ref else "—", "Paper edges": _i(ref[1]) if ref else "—",
                 "Paper pres.": _f(ref[2]) if ref else "—", "Paper mod.": _f(ref[3]) if ref else "—",
+                "Notes": _note(r),
             })
     return pd.DataFrame(out)
 
@@ -191,7 +218,7 @@ def table5(df: pd.DataFrame, cfg) -> pd.DataFrame:
 
 def table6(run_dir: Path) -> pd.DataFrame:
     out = []
-    files = {p.parent.parent.name: p for p in run_dir.glob("*/scalability/scalability.json")}
+    files = {p.parent.parent.name: p for p in run_dir.glob("*/scalability/scalability.json") if _current(p.parent)}
     for model in _order(files):
         s = load_json(files[model])
         ref = paper.TABLE6[paper.scale_bucket(s["params"])]
@@ -210,6 +237,8 @@ def table_transcoders(run_dir: Path) -> pd.DataFrame:
         e = load_json(path)
         task_fvu = {}
         for g in (path.parent.parent / ("graphs" if path.parent.name == "transcoder" else "graphs_nocross")).glob("*/graph.json"):
+            if not _current(g.parent):
+                continue
             fv = load_json(g)["info"].get("task_fvu")
             if fv:
                 task_fvu[g.parent.name] = sum(fv) / len(fv)
@@ -238,7 +267,7 @@ def table_methods(df: pd.DataFrame) -> pd.DataFrame:
                     "Empty-circuit pres.": _f(r.preservation_empty), "Loss gap recovered": _f(r.faithfulness), "Pres. (strict)": _f(r.preservation_strict),
                     "Faithfulness": _f(r.faithfulness), "Interv. effect": _f(r.intervention_effect), "KL": _f(r.kl, 3),
                     "Purity": _f(r.concept_purity), "Mod.": _f(r.modularity), "DL (bits)": _i(r.description_length_bits),
-                    "Full acc.": _f(r.acc_full), "Time (s)": _i(r.seconds), "Status": r.status})
+                    "Full acc.": _f(r.acc_full), "Time (s)": _i(r.seconds), "Notes": _note(r)})
     return pd.DataFrame(out)
 
 
@@ -375,12 +404,19 @@ def build_report(run_dir: Path, cfg) -> Path:
 
     extras: dict = {}
     for key, pattern in (("fourier", "*/analysis/fourier/fourier.json"), ("adapters", "*/adapter/adapter.json")):
-        extras[key] = {p.parents[2 if key == "fourier" else 1].name: load_json(p) for p in run_dir.glob(pattern)}
-    gnn = {p.parent.name: load_json(p) for p in run_dir.glob("gnn/*/gnn.json")}
+        extras[key] = {p.parents[2 if key == "fourier" else 1].name: load_json(p) for p in run_dir.glob(pattern)
+                       if key == "adapters" or _current(p.parent)}
+    gnn = {p.parent.name: load_json(p) for p in run_dir.glob("gnn/*/gnn.json") if _current(p.parent)}
     cpath = run_dir / "analysis" / "complexity" / "complexity.json"
     complexity = load_json(cpath) if cpath.exists() else None
-    errors = [{"stage": str(p.parent.relative_to(run_dir)).replace("\\", "/"), **load_json(p)} for p in run_dir.rglob("ERROR.json")
-              if not (p.parent / "DONE.json").exists()]
+    errors = []
+    for p in run_dir.rglob("ERROR.json"):
+        stage = str(p.parent.relative_to(run_dir)).replace("\\", "/")
+        if (p.parent / "DONE.json").exists() or ".hub_mirror" in stage:
+            continue  # the stage succeeded on a later attempt
+        if "/" not in stage and (run_dir / stage / "transcoder" / "DONE.json").exists():
+            continue  # "could not prepare model" from a session whose environment was later fixed
+        errors.append({"stage": stage, **load_json(p)})
 
     h = df[df.name == "hierarchical"] if not df.empty else df
     ap = df[df.name == "attribution_patching"] if not df.empty else df

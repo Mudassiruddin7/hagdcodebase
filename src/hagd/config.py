@@ -215,6 +215,9 @@ DEFAULTS: dict[str, Any] = {
     "search": {
         "theta": 0.9,  # [paper] sufficiency threshold of Eq. 10 / fidelity threshold of Eq. 2
         "criterion": "combined",  # ratio (Eq. 10 alone) | normalized (loss gap) | combined (min of both); see validation.Criterion
+        # skip circuit search when the full model's accuracy is below chance + min_above_chance * (1 - chance):
+        # Eq. 10 is meaningless there (an empty circuit "preserves" a chance-level accuracy).  0 disables.
+        "min_above_chance": 0.1,
         "min_nodes": 2,
         "max_nodes": 6000,
         "growth": 1.5,

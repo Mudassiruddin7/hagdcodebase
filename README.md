@@ -45,9 +45,19 @@ Hugging Face Hub; run artifacts and results are stored in the dataset repo
 4. Pick the `molab` profile and press **Start / resume**.
 
 The notebook starts the pipeline as a background process and shows live progress and results.
-molab sandboxes are not persistent and can end before the 12-hour limit, so every finished stage —
-and a transcoder checkpoint every 15 minutes — is pushed to the Hub. Pressing **Start** in a new
-session continues from there.
+molab sandboxes are not persistent and can end before the 12-hour limit, so the run is built to be
+interrupted:
+
+- Every finished stage is pushed to the Hub, and transcoder checkpoints every 15 minutes, uploaded
+  in the background so training does not wait. A push that fails is queued and retried.
+- Opening the notebook in a new session resumes automatically when a GPU is attached (untick
+  *Resume automatically* to prevent that). **Start / resume** does the same by hand.
+- A resumed session skips finished models without downloading their weights, and the report pulls
+  every earlier session's results from the Hub before it is built.
+- The pipeline log is uploaded every 10 minutes to `runs/<run>/logs/` on the Hub, so progress can be
+  followed without the notebook.
+- Tasks on which a model is at chance (accuracy below chance + 10% of the remaining range) are
+  recorded as `at_chance` and get no circuit search: Eq. 10 is meaningless there.
 
 ### From a terminal
 

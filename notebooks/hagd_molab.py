@@ -151,7 +151,8 @@ def _(mo):
 def _(mo, os):
     import torch
 
-    if torch.cuda.is_available():
+    has_gpu = torch.cuda.is_available()
+    if has_gpu:
         _p = torch.cuda.get_device_properties(0)
         _gpu = f"**GPU:** {_p.name} — {_p.total_memory / 2**30:.0f} GB"
     else:
@@ -159,7 +160,7 @@ def _(mo, os):
     _tok = "found" if (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")) else "**missing**"
     token_box = mo.ui.text(kind="password", label="HF token (only if no HF_TOKEN secret is set)", full_width=True)
     mo.vstack([mo.md(f"{_gpu}\n\n**HF_TOKEN secret:** {_tok}"), token_box])
-    return (token_box,)
+    return has_gpu, token_box
 
 
 @app.cell
@@ -191,9 +192,11 @@ def _(MODEL_REGISTRY, PHASES, load_config, mo, profile):
     extra = mo.ui.text(value="", label="Extra overrides, e.g. transcoder.num_tokens=5e6 search.seeds=3", full_width=True)
     start = mo.ui.run_button(label="Start / resume", kind="success")
     stop = mo.ui.run_button(label="Stop", kind="danger")
-    mo.vstack([mo.hstack([models, phases]), mo.hstack([run_name, repo_id]), extra, mo.hstack([start, stop], justify="start"),
+    auto = mo.ui.checkbox(value=True, label="Resume automatically when this notebook opens (only with a GPU attached)")
+    mo.vstack([mo.hstack([models, phases]), mo.hstack([run_name, repo_id]), extra,
+               mo.hstack([start, stop, auto], justify="start"),
                mo.md(f"GNN label models for this profile: `{', '.join(_cfg.label_models)}` · tasks: `{', '.join(_cfg.tasks)}`")])
-    return extra, models, phases, repo_id, run_name, start, stop
+    return auto, extra, models, phases, repo_id, run_name, start, stop
 
 
 @app.cell
@@ -232,9 +235,18 @@ def _(Path, runs_root, run_name):
 
 
 @app.cell
-def _(console_log, extra, mo, models, os, phases, pid_file, profile, repo_dir, repo_id, run_dir, run_name, running_pid,
-      runs_root, stack_ok, start, subprocess, sys, token_box):
-    mo.stop(not start.value)
+def _():
+    # survives re-runs of the cells below: auto-resume fires at most once per kernel
+    auto_state = {"fired": False}
+    return (auto_state,)
+
+
+@app.cell
+def _(auto, auto_state, console_log, extra, has_gpu, mo, models, os, phases, pid_file, profile, repo_dir, repo_id, run_dir,
+      run_name, running_pid, runs_root, stack_ok, start, subprocess, sys, token_box):
+    _auto = bool(auto.value and has_gpu and stack_ok and not auto_state["fired"])
+    mo.stop(not (start.value or _auto))
+    auto_state["fired"] = True
     if not stack_ok:
         launch_msg = mo.md("**Not started:** the model stack failed its import check (see Setup above). "
                            "Restart the kernel / session so setup runs again.")
@@ -301,6 +313,10 @@ def _(console_log, mo, refresh, run_dir, running_pid, subprocess):
             _meta = _json.loads(_p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        from hagd.hub import PROTOCOL as _PROTOCOL, UNVERSIONED as _UNVERSIONED
+
+        if _p.parent.name not in _UNVERSIONED and _meta.get("protocol") != _PROTOCOL:
+            continue  # left over from an older protocol; it is being recomputed
         _rows.append({"stage": str(_p.parent.relative_to(run_dir)).replace("\\", "/"), "finished": _meta.get("finished_at", ""),
                       "nodes": _meta.get("nodes", ""), "edges": _meta.get("edges", ""),
                       "preservation": round(_meta["preservation"], 3) if isinstance(_meta.get("preservation"), float) else "",
@@ -330,13 +346,17 @@ def _(mo):
 
 
 @app.cell
-def _(load_config, mo, profile, rebuild, refresh, repo_id, run_dir, run_name, runs_root):
+def _(mo, os, profile, rebuild, refresh, repo_dir, repo_id, run_dir, run_name, runs_root, subprocess, sys, token_box):
     refresh
     if rebuild.value:
-        from hagd.report import build_report
-
-        build_report(run_dir, load_config(profile.value, {"run_name": run_name.value, "output_dir": str(runs_root),
-                                                           "hub": {"repo_id": repo_id.value}}))
+        # through the CLI, so results of earlier sessions are pulled from the Hub before the tables are built
+        _env = dict(os.environ)
+        if token_box.value:
+            _env["HF_TOKEN"] = token_box.value
+        _env["PYTHONPATH"] = str(repo_dir / "src") + os.pathsep + _env.get("PYTHONPATH", "")
+        subprocess.run([sys.executable, "-m", "hagd.cli", "report", "--profile", profile.value, "--run-name", run_name.value,
+                        "--output-dir", str(runs_root), "--repo-id", repo_id.value], cwd=str(repo_dir), env=_env,
+                       capture_output=True, text=True, timeout=1800)
     _report = run_dir / "report" / "README.md"
     if _report.exists():
         _text = _report.read_text(encoding="utf-8")

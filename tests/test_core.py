@@ -446,6 +446,53 @@ def test_exhaustive_core_recovers_planted_circuit():
     assert info["status"] == "unreachable" and info["pool"] == len(order)
 
 
+def test_failed_hub_push_is_queued_and_retried(tmp_path, monkeypatch):
+    """A push that fails (Hub outage, rate limit) must not be dropped: it is retried before later pushes."""
+    import hagd.hub as hub_mod
+
+    monkeypatch.setattr(hub_mod.time, "sleep", lambda s: None)
+
+    class FakeApi:
+        def __init__(self):
+            self.fail, self.uploaded = True, []
+
+        def upload_folder(self, folder_path, path_in_repo, **kw):
+            if self.fail:
+                raise RuntimeError("503 Service Unavailable")
+            self.uploaded.append(path_in_repo)
+
+        upload_file = upload_folder
+
+    h = hub_mod.Hub("user/repo", tmp_path, "run", enabled=False)
+    h.enabled, h.can_write, h._api = True, True, FakeApi()
+    for rel in ("a", "b"):
+        (tmp_path / rel).mkdir()
+        (tmp_path / rel / "x.json").write_text("{}")
+    assert h.push("a") is False and "a" in h._pending
+    h._api.fail = False
+    assert h.push("b") is True
+    assert h._api.uploaded == ["runs/run/a", "runs/run/b"] and not h._pending  # the queued push went first
+
+    # background uploads: a second one is refused while the first is running, and waiting drains it
+    import threading
+
+    gate = threading.Event()
+    h._api.upload_folder = lambda folder_path, path_in_repo, **kw: gate.wait(5)
+    assert h.push("a", checkpoints=True, background=True) is True
+    assert h.background_busy() and h.push("a", checkpoints=True, background=True) is False
+    gate.set()
+    h.wait_background()
+    assert not h.background_busy()
+
+    # with uploads disabled nothing is attempted (and nothing waits on retries)
+    off = hub_mod.Hub("user/repo", tmp_path, "run", enabled=False)
+    calls = []
+    monkeypatch.setattr(off, "_upload", lambda *a, **k: calls.append(a) or False)
+    off.push_logs(every_minutes=0)
+    off.flush_pending()
+    assert off.push("a") is False and not calls
+
+
 def test_nodes_to_dict_groups_by_layer():
     d = nodes_to_dict(np.array([0, 0, 1, 2]), np.array([5, 6, 7, 8]), np.array([0, 2, 3]))
     assert {k: v.tolist() for k, v in d.items()} == {0: [5], 1: [7], 2: [8]}

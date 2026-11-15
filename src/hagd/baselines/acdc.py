@@ -180,6 +180,11 @@ def run_acdc(fm, graph, stats, data, cfg, seed: int = 0) -> dict:
     evaluate = make_evaluator(fm, stats, graph, data.val, cfg.validation)
     crit = make_criterion(data, evaluate, cfg)
     weight = {(int(s), int(d)): float(w) for s, d, w in zip(graph.edge_src, graph.edge_dst, graph.edge_w)}
+    # score of the complete pool before any edge is pruned: an upper bound for what ACDC can return
+    pool_score = float(crit(evaluate(np.concatenate(pools_v).astype(np.int64))))
+    if pool_score < float(cfg.search.theta):
+        log.info("ACDC %s/%s: the %d-feature/layer pool itself scores %.3f < theta; pruning cannot recover it",
+                 graph.model, graph.task, per_layer, pool_score)
 
     best, runs, status = None, [], "ok"
     for tau in a.taus:
@@ -215,6 +220,7 @@ def run_acdc(fm, graph, stats, data, cfg, seed: int = 0) -> dict:
     seconds = {"attribution_nodes": graph.info.get("node_seconds", 0.0), "search": time.time() - t0}
     full_edges = sizes[-1] + sum(sizes[i] * sizes[i + 1] for i in range(len(sizes) - 1))
     extra = {"status": status, "runs": runs, "pool_per_layer": per_layer, "initial_edges": int(full_edges),
+             "pool_score": pool_score,
              "reached_theta": bool(best[0][0]) if best else False,
              "ops": {"model_evaluations": int(sum(r["edges_tested"] for r in runs)), "replicas": 1 + model.k_max}}
     if best is None:
