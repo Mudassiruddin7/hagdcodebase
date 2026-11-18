@@ -78,6 +78,8 @@ class ModelSpec:
     dtype: str = "float32"  # dtype used on CUDA; CPU always runs float32
     gated: bool = False
     fallback_ids: tuple[str, ...] = field(default_factory=tuple)
+    # repos whose tokenizer is identical, used when this repo's own cannot be loaded
+    tokenizer_fallbacks: tuple[str, ...] = field(default_factory=tuple)
     in_paper: bool = True
 
 
@@ -91,11 +93,14 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         ModelSpec("pythia-2.8b", "EleutherAI/pythia-2.8b", "pythia", "Pythia-2.8B", 2.8e9, 32, 2560, 32, "300B", k=80, dtype="bfloat16"),
         ModelSpec("pythia-6.9b", "EleutherAI/pythia-6.9b", "pythia", "Pythia-6.9B", 6.9e9, 32, 4096, 32, "300B", k=96, dtype="bfloat16"),
         ModelSpec("llama-7b", "meta-llama/Llama-2-7b-hf", "llama", "Llama-7B", 6.7e9, 32, 4096, 32, "1T", k=96,
-                  dtype="bfloat16", gated=True, fallback_ids=("NousResearch/Llama-2-7b-hf",)),
+                  dtype="bfloat16", gated=True, fallback_ids=("NousResearch/Llama-2-7b-hf",),
+                  tokenizer_fallbacks=("NousResearch/Llama-2-7b-hf",)),
         ModelSpec("llama-13b", "meta-llama/Llama-2-13b-hf", "llama", "Llama-13B", 13e9, 40, 5120, 40, "1T", k=112,
-                  dtype="bfloat16", gated=True, fallback_ids=("NousResearch/Llama-2-13b-hf",)),
+                  dtype="bfloat16", gated=True, fallback_ids=("NousResearch/Llama-2-13b-hf",),
+                  tokenizer_fallbacks=("NousResearch/Llama-2-7b-hf",)),
         ModelSpec("llama-70b", "meta-llama/Llama-2-70b-hf", "llama", "Llama-70B", 70e9, 80, 8192, 64, "1.4T", k=128,
-                  dtype="bfloat16", gated=True, fallback_ids=("TheBloke/Llama-2-70B-fp16",)),
+                  dtype="bfloat16", gated=True, fallback_ids=("TheBloke/Llama-2-70B-fp16",),
+                  tokenizer_fallbacks=("NousResearch/Llama-2-7b-hf",)),
         # Not in the paper: small models used to produce exhaustive-search labels for the GNN
         # ("ground-truth circuit labels, obtained through exhaustive search on small models").
         ModelSpec("pythia-70m", "EleutherAI/pythia-70m", "pythia", "Pythia-70M", 70e6, 6, 512, 8, "300B", k=32, in_paper=False),

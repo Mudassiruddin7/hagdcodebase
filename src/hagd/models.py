@@ -64,7 +64,7 @@ class LM:
     def load(cls, spec: ModelSpec, device: torch.device, quantization: str | None = None) -> "LM":
         import importlib
 
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModelForCausalLM
 
         # transformers hides the real reason behind "Could not import module ..."; surface it once
         mod = {"gpt2": "gpt2.modeling_gpt2", "pythia": "gpt_neox.modeling_gpt_neox", "llama": "llama.modeling_llama"}.get(spec.family)
@@ -82,6 +82,8 @@ class LM:
         last_err: Exception | None = None
         for hf_id in (spec.hf_id, *spec.fallback_ids):
             try:
+                # tokenizer first: it fails in seconds, the weights take minutes (26 GB for Llama-13B)
+                tok = cls._load_tokenizer(hf_id, spec)
                 kwargs: dict = {"low_cpu_mem_usage": True}
                 if device.type == "cuda" and not quantization:
                     # stream the weights straight onto the GPU: the host may have less RAM than the model needs
@@ -104,7 +106,6 @@ class LM:
                     model = AutoModelForCausalLM.from_pretrained(hf_id, torch_dtype=dtype, **kwargs)
                 if not quantization and "device_map" not in kwargs:
                     model = model.to(device)
-                tok = AutoTokenizer.from_pretrained(hf_id)
                 if hf_id != spec.hf_id:
                     log.warning("%s: loaded fallback repo %s (primary %s unavailable: %s)",
                                 spec.key, hf_id, spec.hf_id, str(last_err)[:120])
@@ -117,6 +118,28 @@ class LM:
                 last_err = e
                 log.warning("could not load %s: %s", hf_id, str(e)[:200])
         raise RuntimeError(f"failed to load {spec.key}: {last_err}")
+
+    @staticmethod
+    def _load_tokenizer(hf_id: str, spec: ModelSpec):
+        """The repo's own tokenizer, else one from ``spec.tokenizer_fallbacks`` (same vocabulary).
+
+        Some mirrors ship only ``tokenizer.model`` (no ``tokenizer.json``); without the
+        ``sentencepiece`` package transformers cannot read it ("Error parsing line ..." -
+        NousResearch/Llama-2-13b-hf on molab).  All Llama-2 sizes share one tokenizer.
+        """
+        from transformers import AutoTokenizer
+
+        err: Exception | None = None
+        for tid in (hf_id, *spec.tokenizer_fallbacks):
+            try:
+                tok = AutoTokenizer.from_pretrained(tid)
+                if tid != hf_id:
+                    log.warning("%s: tokenizer of %s unusable (%s); using the identical tokenizer of %s",
+                                spec.key, hf_id, str(err)[:120], tid)
+                return tok
+            except Exception as e:  # noqa: BLE001
+                err = e
+        raise RuntimeError(f"no usable tokenizer for {hf_id}: {err}")
 
     # ------------------------------------------------------------------ tokenization
     def encode(self, text: str) -> list[int]:

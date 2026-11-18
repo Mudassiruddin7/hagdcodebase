@@ -21,6 +21,7 @@ dependencies = [
     "matplotlib>=3.7",
     "pyyaml>=6.0",
     "requests>=2.31",
+    "sentencepiece>=0.1.99",  # Llama-2 mirrors that ship only tokenizer.model
 ]
 
 [project.optional-dependencies]

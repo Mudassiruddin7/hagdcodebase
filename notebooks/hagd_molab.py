@@ -109,7 +109,8 @@ def _(mo):
     _wanted = {"torch": "torch", "transformers": "transformers", "datasets": "datasets", "huggingface_hub": "huggingface_hub",
                "safetensors": "safetensors", "scipy": "scipy", "sklearn": "scikit-learn", "pandas": "pandas",
                "matplotlib": "matplotlib", "yaml": "pyyaml", "requests": "requests", "zstandard": "zstandard",
-               "bitsandbytes": "bitsandbytes", "accelerate": "accelerate", "dotenv": "python-dotenv", "psutil": "psutil"}
+               "bitsandbytes": "bitsandbytes", "accelerate": "accelerate", "dotenv": "python-dotenv", "psutil": "psutil",
+               "sentencepiece": "sentencepiece"}  # Llama tokenizers shipped only as tokenizer.model
     _missing = [pkg for mod, pkg in _wanted.items() if _iu.find_spec(mod) is None]
     if _missing:
         # pin the torch that is already there, so e.g. accelerate cannot upgrade it under torchvision
