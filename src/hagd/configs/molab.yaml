@@ -64,7 +64,8 @@ model_overrides:
   llama-70b:
     quantization: 4bit
     tasks: [mod_arith, factual_qa, winogrande]
-    adapt: {steps: 4000, max_minutes: 120, eval_every: 250}
+    # gradient checkpointing + batch 16: at batch 64 without it the adapter ran out of 96 GB at step 1
+    adapt: {steps: 4000, max_minutes: 120, eval_every: 250, batch_size: 16, gradient_checkpointing: true}
     transcoder: {num_tokens: 2000000, layer_stride: 20, expansion: 4, tokens_per_step: 1024, batch_seqs: 16,
                  max_minutes: 150, eval_tokens: 50000}
     data: {batch_size: 8, n_discover: 96, n_val: 48, n_test: 128}

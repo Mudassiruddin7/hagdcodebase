@@ -55,7 +55,12 @@ class LoRALinear(nn.Module):
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         out = self.base(x, *args, **kwargs)
         if self._adapter[0].enabled:
-            delta = (x.to(self.A.dtype) @ self.A.t()) @ self.B.t()
+            if self._adapter[0].low_memory:
+                # compute in the activations' dtype: autograd then keeps a reference to x (already stored for the
+                # base layer) instead of a new float32 copy per module - ~24 GB on Llama-70B at batch 64
+                delta = (x @ self.A.t().to(x.dtype)) @ self.B.t().to(x.dtype)
+            else:
+                delta = (x.to(self.A.dtype) @ self.A.t()) @ self.B.t()
             out = out + (delta * self.scaling).to(out.dtype)
         return out
 
@@ -65,6 +70,7 @@ class LoRAAdapter:
 
     def __init__(self) -> None:
         self.enabled = False
+        self.low_memory = False  # set for quantized models (see LoRALinear.forward)
         self.modules: dict[str, LoRALinear] = {}
 
     def parameters(self) -> list[nn.Parameter]:
@@ -102,6 +108,8 @@ def attach_lora(lm, rank: int, alpha: float) -> LoRAAdapter:
     if lm.adapter is not None:
         return lm.adapter
     adapter = LoRAAdapter()
+    # 4-bit weights are stored as uint8 (bitsandbytes): keep LoRA in the activations' dtype there
+    adapter.low_memory = any(p.dtype == torch.uint8 for p in lm.model.parameters())
     targets = []
     for bi, block in enumerate(lm.blocks):
         for name, module in block.named_modules():
@@ -177,6 +185,36 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
     # the other two tasks.)
     best = {"score": -1.0, "state": None, "step": 0, "accs": {}}
     step = 0
+    # Gradient checkpointing (recompute each block's activations in the backward pass) for models whose
+    # activations do not fit: Llama-70B ran out of 96 GB at the first step without it.  transformers only
+    # checkpoints in training mode; the Llama/Pythia blocks have no dropout, so outputs are unchanged.
+    checkpointing = bool(a.get("gradient_checkpointing", False)) and hasattr(lm.model, "gradient_checkpointing_enable")
+    if checkpointing:
+        lm.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        lm.model.train()
+    try:
+        step, best = _train_loop(lm, a, train, val, names, order, rng, opt, sched, params, adapter, best, history,
+                                 steps, t0)
+    finally:
+        if checkpointing:
+            lm.model.gradient_checkpointing_disable()
+            lm.model.eval()
+    if best["state"] is not None:
+        adapter.load_state_dict(best["state"])
+    adapter.enabled = False
+    log.info("adapt: kept step %d (validation accuracy %s)", best["step"],
+             " ".join(f"{k}={v:.3f}" for k, v in best["accs"].items()))
+    # val_acc describes the weights that were kept, not the last step
+    return {"steps": step, "best_step": best["step"], "seconds": time.time() - t0, "history": history,
+            "val_acc": {"step": best["step"], **best["accs"]}, "last_step": history[-1] if history else {},
+            "rank": int(a.rank), "lr": float(a.lr), "tasks": [t.name for t in tasks],
+            "gradient_checkpointing": checkpointing,
+            "full_domain_tasks": full_domain, "train_batches": {n: len(bs) for n, bs in train.items()}}
+
+
+def _train_loop(lm, a, train, val, names, order, rng, opt, sched, params, adapter, best, history, steps, t0):
+    """The optimisation loop of ``finetune_adapter``; returns the last step and the best checkpoint."""
+    step = 0
     for step in range(1, steps + 1):
         name = names[(step - 1) % len(names)]
         if not order[name]:
@@ -202,13 +240,4 @@ def finetune_adapter(lm, tasks: list[Task], cfg, seed: int = 0) -> dict:
             if (time.time() - t0) / 60 > float(a.max_minutes):
                 log.warning("adapt: time budget of %s min reached at step %d", a.max_minutes, step)
                 break
-    if best["state"] is not None:
-        adapter.load_state_dict(best["state"])
-    adapter.enabled = False
-    log.info("adapt: kept step %d (validation accuracy %s)", best["step"],
-             " ".join(f"{k}={v:.3f}" for k, v in best["accs"].items()))
-    # val_acc describes the weights that were kept, not the last step
-    return {"steps": step, "best_step": best["step"], "seconds": time.time() - t0, "history": history,
-            "val_acc": {"step": best["step"], **best["accs"]}, "last_step": history[-1] if history else {},
-            "rank": int(a.rank), "lr": float(a.lr), "tasks": [t.name for t in tasks],
-            "full_domain_tasks": full_domain, "train_batches": {n: len(bs) for n, bs in train.items()}}
+    return step, best

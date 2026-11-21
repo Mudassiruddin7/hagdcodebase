@@ -493,6 +493,36 @@ def test_failed_hub_push_is_queued_and_retried(tmp_path, monkeypatch):
     assert off.push("a") is False and not calls
 
 
+def test_adapter_training_with_gradient_checkpointing_and_low_memory_lora(cfg):
+    """The Llama-70B adapter settings: checkpointed training runs, restores eval mode, and the
+    low-memory LoRA path computes the same function as the default one."""
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    from conftest import _CharTokenizer
+    from hagd.adapt import attach_lora, finetune_adapter
+    from hagd.config import Cfg, deep_merge
+    from hagd.models import LM
+
+    torch.manual_seed(0)
+    lm = LM(GPT2LMHeadModel(GPT2Config(n_layer=2, n_embd=32, n_head=4, vocab_size=128, n_positions=96,
+                                       bos_token_id=1, eos_token_id=2)), _CharTokenizer(), key="tiny-adapt")
+    adapter = attach_lora(lm, 4, 4)
+    for m in adapter.modules.values():  # non-zero B so the LoRA branch matters
+        torch.nn.init.normal_(m.B, std=0.1)
+    adapter.enabled = True
+    ids = torch.randint(3, 120, (3, 10))
+    ref = lm.logits(ids)
+    adapter.low_memory = True
+    assert torch.allclose(lm.logits(ids), ref, atol=1e-5)
+
+    c = Cfg.wrap(deep_merge(cfg.to_dict(), {"adapt": {"steps": 6, "eval_every": 3, "batch_size": 8, "max_minutes": 5,
+                                                      "gradient_checkpointing": True},
+                                            "data": {"n_train": 24, "n_val": 8}}))
+    meta = finetune_adapter(lm, [get_task("sorting", c.data)], c, 0)
+    assert meta["gradient_checkpointing"] and meta["steps"] == 6
+    assert not lm.model.training and not lm.model.is_gradient_checkpointing
+
+
 def test_nodes_to_dict_groups_by_layer():
     d = nodes_to_dict(np.array([0, 0, 1, 2]), np.array([5, 6, 7, 8]), np.array([0, 2, 3]))
     assert {k: v.tolist() for k, v in d.items()} == {0: [5], 1: [7], 2: [8]}

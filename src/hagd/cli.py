@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .config import CONFIG_DIR, load_config
@@ -41,6 +42,8 @@ def _overrides(args) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # less fragmentation for the multi-GB allocations of the 70B run (read when CUDA is first used)
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     profiles = sorted(p.stem for p in CONFIG_DIR.glob("*.yaml"))
     ap = argparse.ArgumentParser(prog="hagd", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
