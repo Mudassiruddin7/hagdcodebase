@@ -99,7 +99,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
                   dtype="bfloat16", gated=True, fallback_ids=("NousResearch/Llama-2-13b-hf",),
                   tokenizer_fallbacks=("NousResearch/Llama-2-7b-hf",)),
         ModelSpec("llama-70b", "meta-llama/Llama-2-70b-hf", "llama", "Llama-70B", 70e9, 80, 8192, 64, "1.4T", k=128,
-                  dtype="bfloat16", gated=True, fallback_ids=("TheBloke/Llama-2-70B-fp16",),
+                  dtype="bfloat16", gated=True,
+                  fallback_ids=("monsterapi/Llama-2-70b-hf_4bit_bnb", "TheBloke/Llama-2-70B-fp16"),
                   tokenizer_fallbacks=("NousResearch/Llama-2-7b-hf",)),
         # Not in the paper: small models used to produce exhaustive-search labels for the GNN
         # ("ground-truth circuit labels, obtained through exhaustive search on small models").

@@ -345,12 +345,16 @@ class Pipeline:
             "seconds": {"total": 0.0}, "nodes": [], "edges": []})
         self.stages.finish(rel, {"status": "at_chance", "acc_full": info["acc"]})
 
+    def _model_tasks(self, key: str) -> list[str]:
+        """Benchmark tasks of one model: ``model_overrides.<key>.tasks`` or the run's task list."""
+        return list(for_model(self.cfg, key).tasks)
+
     def _required_stages(self, key: str) -> list[str] | None:
         """Every stage phase_circuits produces for ``key`` (None if that cannot be known without the model)."""
         cfg = for_model(self.cfg, key)
         abl_model = self.cfg.ablations.model or (self.cfg.models[0] if self.cfg.models else None)
         rels = []
-        for task in self.cfg.tasks:
+        for task in self._model_tasks(key):
             base = f"{key}/circuits/{task}"
             if not self.stages.done(f"{base}/hierarchical"):
                 return None  # its at-chance status is only known once the model is loaded
@@ -364,7 +368,7 @@ class Pipeline:
                         rels.append(f"{base}/{method}")
             if key == abl_model and task in cfg.ablations.tasks:
                 rels += [f"{base}/ablation_{v}" for v in cfg.ablations.configs if v != "full"]
-        if bool(cfg.fourier.enabled) and "mod_arith" in self.cfg.tasks and \
+        if bool(cfg.fourier.enabled) and "mod_arith" in self._model_tasks(key) and \
                 load_json(self.run_dir / key / "circuits" / "mod_arith" / "hierarchical" / "circuit.json").get("nodes"):
             rels.append(f"{key}/analysis/fourier")
         return rels + [f"{key}/scalability"]
@@ -372,12 +376,12 @@ class Pipeline:
     def _model_complete(self, key: str) -> bool:
         """Every circuit stage of this model finished in an earlier session (so its weights need not be loaded)."""
         rel = f"{key}/complete"
-        if self.stages.done(rel) and set(self.cfg.tasks) <= set(self.stages.result(rel).get("tasks", [])):
+        if self.stages.done(rel) and set(self._model_tasks(key)) <= set(self.stages.result(rel).get("tasks", [])):
             return True
         # models finished before the completion marker existed: check their stages one by one
         required = self._required_stages(key)
         if required is not None and all(self.stages.done(r) for r in required):
-            self.stages.finish(rel, {"tasks": list(self.cfg.tasks), "inferred": True})
+            self.stages.finish(rel, {"tasks": self._model_tasks(key), "inferred": True})
             return True
         return False
 
@@ -390,7 +394,8 @@ class Pipeline:
             if self._model_complete(key):
                 log.info("%s: all stages finished in an earlier session - skipping", key)
                 continue
-            ctx = self._open(key, list(cfg.tasks))
+            tasks = self._model_tasks(key)
+            ctx = self._open(key, tasks)
             if ctx is None:
                 continue
             reset_peak_memory()
@@ -398,7 +403,7 @@ class Pipeline:
             gnn = self.gnn_for(key)
             mcfg = ctx.cfg
             failed_before = len(list(self.run_dir.glob(f"{key}/**/ERROR.json")))
-            for task in cfg.tasks:
+            for task in tasks:
                 if not self.stages.done(f"{key}/circuits/{task}/hierarchical"):
                     chance = self._guard(f"{key}/circuits/{task}/hierarchical", lambda task=task: self._at_chance(ctx, task))
                     if chance:
@@ -428,13 +433,13 @@ class Pipeline:
                         self.circuit(ctx, task, f"ablation_{variant}", lambda fm, g, s, d, variant=variant: extract_circuit(
                             fm, g, s, d, gnn, mcfg, variant, int(mcfg.seed)), cross_layer=cross)
             # ---- Fourier structure of the modular-arithmetic circuit
-            if bool(mcfg.fourier.enabled) and "mod_arith" in cfg.tasks:
+            if bool(mcfg.fourier.enabled) and "mod_arith" in tasks:
                 self._fourier(ctx)
             self._scalability(ctx, time.time() - t_model)
             # mark the model complete only if nothing failed, so a resumed session retries failures
             failed_now = [p for p in self.run_dir.glob(f"{key}/**/ERROR.json") if not (p.parent / "DONE.json").exists()]
             if not failed_now:
-                self.stages.finish(f"{key}/complete", {"tasks": list(cfg.tasks)})
+                self.stages.finish(f"{key}/complete", {"tasks": tasks})
             else:
                 log.warning("%s: %d stage(s) failed (%d before this session); the model will be revisited on resume",
                             key, len(failed_now), failed_before)
@@ -462,7 +467,7 @@ class Pipeline:
         """Table VI inputs: memory, extraction time and attribution throughput for this model."""
         rel = f"{ctx.key}/scalability"
         rows = []
-        for task in self.cfg.tasks:
+        for task in self._model_tasks(ctx.key):
             c = self.run_dir / ctx.key / "circuits" / task / "hierarchical" / "circuit.json"
             g = self.run_dir / ctx.key / "graphs" / task / "graph.json"
             # earlier sessions' stages are only on the Hub: done() restores them
@@ -496,8 +501,20 @@ class Pipeline:
             return
         rel = "analysis/transfer"
         rows = []
+        # reuse pairs whose two circuits have not changed since they were computed (each pair can take minutes)
+        cached = {}
+        if self.stages.done(rel) and (self.run_dir / rel / "transfer.json").exists():
+            cached = {(r["source"], r["target"], r["task"]): r for r in load_json(self.run_dir / rel / "transfer.json")
+                      if r.get("stamp")}
         for src, dst in pairs:
             for task in t.tasks:
+                stamp = None
+                if all(self.stages.done(f"{m}/circuits/{task}/hierarchical") for m in (src, dst)):
+                    stamp = [self.stages.result(f"{m}/circuits/{task}/hierarchical").get("finished_at") for m in (src, dst)]
+                hit = cached.get((src, dst, task))
+                if hit is not None and stamp is not None and hit["stamp"] == stamp:
+                    rows.append(hit)
+                    continue
                 paths = [self.run_dir / m / "circuits" / task / "hierarchical" for m in (src, dst)]
                 if not all(self.stages.done(f"{m}/circuits/{task}/hierarchical") and self.stages.done(f"{m}/graphs/{task}")
                            for m in (src, dst)):
@@ -509,7 +526,7 @@ class Pipeline:
                 g1 = AttributionGraph.load(self.run_dir / src / "graphs" / task)
                 g2 = AttributionGraph.load(self.run_dir / dst / "graphs" / task)
                 res = transfer_coefficient(c1, g1.anchors, len(g1.layers), c2, g2.anchors, len(g2.layers), float(t.min_corr))
-                rows.append({"source": src, "target": dst, "task": task, **res})
+                rows.append({"source": src, "target": dst, "task": task, **res, "stamp": stamp})
                 log.info("transfer %s -> %s on %s: tau = %s (%d aligned features)", src, dst, task, _fmt(res["tau"]), res["aligned"])
         save_json(self.stages.dir(rel) / "transfer.json", rows)
         self.stages.finish(rel, {"pairs": len(rows)})

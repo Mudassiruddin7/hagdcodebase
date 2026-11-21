@@ -4,10 +4,9 @@
 #
 # Compared with the paper profile: smaller transcoder token budgets, and thinned layers for
 # models whose full set of transcoders does not fit next to the model in 96 GB.
-# Llama-70B is not in the default list (140 GB of weights; needs 4-bit loading) - add it with
-#   --models ... llama-70b   after the smaller models are done.
+# Llama-70B runs last, in 4-bit, on the three tasks the paper reports for it (see its override below).
 run_name: molab
-models: [gpt2-small, gpt2-medium, gpt2-large, pythia-1.4b, pythia-2.8b, pythia-6.9b, llama-7b, llama-13b]
+models: [gpt2-small, gpt2-medium, gpt2-large, pythia-1.4b, pythia-2.8b, pythia-6.9b, llama-7b, llama-13b, llama-70b]
 label_models: [pythia-70m, pythia-160m, gpt2-small]
 data: {n_train: 6000, n_discover: 192, n_val: 96, n_test: 256, batch_size: 32}
 adapt: {steps: 12000, eval_every: 500, max_minutes: 60}  # round robin: ~4,000 steps per task
@@ -57,9 +56,19 @@ model_overrides:
     transcoder: {num_tokens: 4000000, layer_stride: 8, tokens_per_step: 1536, batch_seqs: 32}
     data: {batch_size: 8}
     attribution: {jac_chunk: 4}
+  # Llama-70B: 4-bit (pre-quantized checkpoint, 36 GB) and only the tasks the paper reports for it
+  # (Table II mod-arith, Table III factual QA, Table IV Llama-7B -> 70B transfer incl. WinoGrande).
+  # Sized from the Llama-13B timings: each task costs ~15-20x its 13B time at 70B; HellaSwag alone
+  # would take ~60 h.  Memory on 96 GB: weights ~36 GB + transcoders (4 layers x 32,768 features,
+  # fp32) ~9 GB + optimizer state ~18 GB + gradients ~9 GB + LoRA ~2 GB.
   llama-70b:
     quantization: 4bit
-    transcoder: {num_tokens: 2000000, layer_stride: 16, expansion: 4, tokens_per_step: 1024, batch_seqs: 16}
-    data: {batch_size: 4, n_discover: 96, n_val: 48, n_test: 128}
-    attribution: {jac_chunk: 2}
+    tasks: [mod_arith, factual_qa, winogrande]
+    adapt: {steps: 4000, max_minutes: 120, eval_every: 250}
+    transcoder: {num_tokens: 2000000, layer_stride: 20, expansion: 4, tokens_per_step: 1024, batch_seqs: 16,
+                 max_minutes: 150, eval_tokens: 50000}
+    data: {batch_size: 8, n_discover: 96, n_val: 48, n_test: 128}
+    attribution: {nodes_per_layer: 256, jac_chunk: 4}
+    validation: {max_tests: 128, rounds: 1}
     baselines: {methods: [attribution_patching]}
+    fourier: {n_examples: 1024}

@@ -93,12 +93,16 @@ class LM:
                     if importlib.util.find_spec("accelerate") is not None:
                         kwargs["device_map"] = {"": device.index or 0}
                 if quantization:
-                    from transformers import BitsAndBytesConfig
+                    from transformers import AutoConfig, BitsAndBytesConfig
 
-                    kwargs["quantization_config"] = BitsAndBytesConfig(
-                        load_in_4bit=quantization == "4bit", load_in_8bit=quantization == "8bit",
-                        bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4",
-                    )
+                    # a checkpoint that is already quantized brings its own settings (e.g. NF4, bf16 compute)
+                    if getattr(AutoConfig.from_pretrained(hf_id), "quantization_config", None) is None:
+                        kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=quantization == "4bit", load_in_8bit=quantization == "8bit",
+                            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4",
+                        )
+                    else:
+                        log.info("%s: %s is pre-quantized; using its own quantization settings", spec.key, hf_id)
                     kwargs["device_map"] = {"": 0}
                 try:
                     model = AutoModelForCausalLM.from_pretrained(hf_id, dtype=dtype, **kwargs)
